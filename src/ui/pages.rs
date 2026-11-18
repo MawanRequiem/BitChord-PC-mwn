@@ -64,6 +64,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             Page::New => new(app, ui, now),
             Page::Search(q) => search(app, ui, q, now),
             Page::Album(id) | Page::Playlist(id) => collection(app, ui, id, now),
+            Page::LocalPlaylist(id) => local_playlist(app, ui, id, now),
             Page::Artist(id) => artist(app, ui, id, now),
             Page::Library(tab) => library(app, ui, *tab, now),
             Page::Downloads => downloads(app, ui, now),
@@ -308,6 +309,7 @@ fn selectable<'a>(app: &'a App, page: &Page) -> Option<(&'a [Track], bool)> {
         Page::Album(id) | Page::Playlist(id) => {
             app.opened(id).map(|o| &o.c).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
         }
+        Page::LocalPlaylist(id) => app.local_playlists.iter().find(|p| &p.id == id).map(|p| (p.tracks.as_slice(), false)),
         Page::Library(LibTab::Songs) => app.opened(super::LIKED_MUSIC).map(|o| (o.c.tracks.as_slice(), false)),
         Page::Library(LibTab::History) => app.history.as_deref().map(|h| (h, false)),
         Page::Library(LibTab::Uploads) => app.uploads.as_deref().map(|u| (u, false)),
@@ -717,8 +719,8 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                 if circle_action(ui, CircleGlyph::Char(icon::SEARCH), "Search in this list", filter_on).clicked() {
                     toggle_search = true;
                 }
-                let more = circle_action(ui, CircleGlyph::More, "More", false);
-                egui::Popup::menu(&more).show(|ui| {
+                let more_button = circle_action(ui, CircleGlyph::More, "More", false);
+                egui::Popup::menu(&more_button).show(|ui| {
                     ui.set_width(226.0);
                     ui.add_space(3.0);
                     if let Some(first) = tracks.first()
@@ -730,6 +732,15 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                         && widgets::menu_action(ui, Some(icon::LIBRARY), if saved { "Remove from library" } else { "Save to library" })
                     {
                         acts.push(Action::SaveCollection(save_id, !saved));
+                    }
+                    if !is_album && !tracks.is_empty() && !more
+                        && widgets::menu_action(ui, Some(icon::LIBRARY), "Save a local copy")
+                    {
+                        acts.push(Action::SaveLocal(crate::local_playlists::Playlist {
+                            id: format!("youtube-{id}"),
+                            title: c.title.clone(),
+                            tracks: tracks.clone(),
+                        }));
                     }
                     if app.logged_in && !auto && !tracks.is_empty() {
                         if widgets::menu_action(ui, Some(icon::LIST_CHECKS), if selecting { "Done selecting" } else { "Select" }) {
@@ -998,19 +1009,13 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
 
 fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
     page_title(ui, "Library");
-    if !app.logged_in {
-        ui.add_space(10.0);
-        ui.label(RichText::new("Sign in to see your playlists, liked songs and history.").color(theme::text_dim()));
-        ui.add_space(12.0);
-        if pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked() {
-            app.start_sign_in(ui.ctx());
-        }
-        return;
-    }
     ui.add_space(12.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        for (t, label) in [(LibTab::Playlists, "Playlists"), (LibTab::Songs, "Liked songs"), (LibTab::Albums, "Albums"), (LibTab::History, "History"), (LibTab::Uploads, "Uploads")] {
+        for (t, label) in [(LibTab::Playlists, "Playlists"), (LibTab::Local, "Local playlists"), (LibTab::Songs, "Liked songs"), (LibTab::Albums, "Albums"), (LibTab::History, "History"), (LibTab::Uploads, "Uploads")] {
+            if !app.logged_in && !matches!(t, LibTab::Local | LibTab::Playlists) {
+                continue;
+            }
             if chip(ui, label, tab == t).clicked() {
                 // Tabs swap in place (no history entry); the current one refreshes.
                 if tab == t {
@@ -1023,6 +1028,28 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
         }
     });
     ui.add_space(12.0);
+    if tab == LibTab::Local {
+        if app.local_playlists.is_empty() {
+            ui.label(RichText::new("Save a local copy from a playlist’s menu, or save your queue.").color(theme::text_dim()));
+        }
+        for playlist in &app.local_playlists {
+            ui.horizontal_wrapped(|ui| {
+                if pill(ui, &playlist.title, Some(icon::LIBRARY), false).clicked() {
+                    app.actions.push(Action::Go(Page::LocalPlaylist(playlist.id.clone())));
+                }
+                ui.label(RichText::new(format!("{} tracks", playlist.tracks.len())).color(theme::text_dim()));
+            });
+        }
+        return;
+    }
+    if !app.logged_in {
+        ui.label(RichText::new("Sign in to see your YouTube Music library.").color(theme::text_dim()));
+        ui.add_space(12.0);
+        if pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked() {
+            app.start_sign_in(ui.ctx());
+        }
+        return;
+    }
     let grid = |ui: &mut Ui, cards: &[Card], acts: &mut Vec<Action>| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(20.0, 22.0);
@@ -1110,10 +1137,30 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                     grid(ui, &lib.playlists, &mut app.actions)
                 }
                 LibTab::Albums => grid(ui, &lib.albums, &mut app.actions),
-                LibTab::Songs | LibTab::History | LibTab::Uploads => unreachable!(),
+                LibTab::Songs | LibTab::History | LibTab::Uploads | LibTab::Local => unreachable!(),
             }
         }
     }
+}
+
+fn local_playlist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
+    let Some(playlist) = app.local_playlists.iter().find(|p| p.id == id) else {
+        page_title(ui, "Local playlist unavailable");
+        return;
+    };
+    page_title(ui, &playlist.title);
+    ui.add_space(12.0);
+    ui.horizontal_wrapped(|ui| {
+        if !playlist.tracks.is_empty() && pill(ui, "Play", Some(icon::PLAY), true).clicked() {
+            app.actions.push(Action::Play(playlist.tracks.clone(), 0));
+        }
+        if pill(ui, "Remove local copy", Some(icon::TRASH_2), false).clicked() {
+            app.actions.push(Action::RemoveLocal(id.to_owned()));
+        }
+    });
+    ui.add_space(10.0);
+    let rows = Rows::new(app, now);
+    list(ui, &rows, &app.liked, &playlist.tracks, true, |_, _| None, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
 }
 
 // ------------------------------------------------------------------ downloads
@@ -1431,6 +1478,8 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
             output_device_picker(app, ui);
         });
         divider(ui);
+        output_effects(app, ui);
+        divider(ui);
         setting_row(ui, "Automix", Some("Slide from one song into the next the way a DJ would: both hold their level for a moment, then swap in one smooth move, instead of a straight fade. The mix picks its own length, in phrases of 8 or 16 bars (16 on long songs), following the beat it hears."), |ui| {
             if toggle(ui, &mut app.automix, "Automix").changed() {
                 app.set_crossfade();
@@ -1474,6 +1523,37 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+}
+
+fn output_effects(app: &mut App, ui: &mut Ui) {
+    let settings = &mut app.output_effects;
+    let before = *settings;
+    for (label, volume) in [("Left volume", &mut settings.left), ("Right volume", &mut settings.right)] {
+        setting_row(ui, label, None, |ui| {
+            ui.add(egui::Slider::new(volume, 0..=100).suffix("%")).on_hover_text(label);
+        });
+    }
+    if settings_row_shown(ui, "Equalizer (16 bands)", "EQ bass midrange treble frequency gain") {
+        let search = search_of(ui);
+        let searching = !search.words.is_empty();
+        egui::CollapsingHeader::new("Equalizer (16 bands)").open(searching.then_some(true)).show(ui, |ui| {
+            if searching {
+                put_search(ui, &SettingsSearch { all: true, ..search.clone() });
+            }
+            for ((_, label, help), gain) in crate::audio::effects::BANDS.into_iter().zip(&mut settings.bands) {
+                setting_row(ui, label, Some(help), |ui| {
+                    ui.add(egui::Slider::new(gain, -12..=12).suffix(" dB")).on_hover_text(label);
+                });
+            }
+            if pill(ui, "Reset equalizer", None, false).clicked() {
+                settings.bands.fill(0);
+            }
+            put_search(ui, &search);
+        });
+    }
+    if *settings != before {
+        app.audio.set_output_effects(*settings);
+    }
 }
 
 /// The hi-res source list: one line per addon, and "+ Add a source" below it that

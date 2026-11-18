@@ -14,6 +14,8 @@ use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
 
 use crate::stream::{self, Shared};
 
+pub mod effects;
+
 pub use crate::stream::TrackDecoder;
 
 pub enum AudioCmd {
@@ -61,6 +63,7 @@ fn now_ms() -> u64 {
 
 #[derive(Default)]
 pub struct AudioStatus {
+    output_effects: std::sync::RwLock<effects::Settings>,
     pub position_ms: AtomicU64,
     /// When `position_ms` was sampled (ms since EPOCH), for smooth extrapolation.
     sampled_at: AtomicU64,
@@ -558,6 +561,10 @@ pub struct AudioHandle {
 }
 
 impl AudioHandle {
+    pub fn set_output_effects(&self, settings: effects::Settings) {
+        *self.status.output_effects.write().unwrap() = settings;
+    }
+
     pub fn send(&self, cmd: AudioCmd) {
         let _ = self.tx.send(cmd);
     }
@@ -736,7 +743,7 @@ struct Output {
 }
 
 impl Output {
-    fn new(tx: Sender<AudioCmd>, status: &AudioStatus, preferred: Option<String>) -> Self {
+    fn new(tx: Sender<AudioCmd>, status: &Arc<AudioStatus>, preferred: Option<String>) -> Self {
         // Mix at the device's own format, so the usual case needs no conversion.
         let config = target(preferred.as_deref()).and_then(|d| d.default_output_config().ok());
         let channels = config.as_ref().and_then(|c| std::num::NonZero::new(c.channels())).unwrap_or(std::num::NonZero::new(2).unwrap());
@@ -749,7 +756,7 @@ impl Output {
     }
 
     /// Opens the picked device, or the default one. False if there's none to open.
-    fn open(&mut self, tx: Sender<AudioCmd>, status: &AudioStatus) -> bool {
+    fn open(&mut self, tx: Sender<AudioCmd>, status: &Arc<AudioStatus>) -> bool {
         // The old device's stream gives our mixer back when it's dropped.
         self.sink = None;
         self.device = None;
@@ -789,7 +796,11 @@ impl Output {
         let mut sink = sink;
         sink.log_on_drop(false);
         let channels = rodio::Source::channels(&source).get();
-        sink.mixer().add(Bridge { inner: Some(source), slot: self.slot.clone(), channels, n: 0 });
+        let rate = rodio::Source::sample_rate(&source).get();
+        sink.mixer().add(Bridge {
+            inner: Some(source), slot: self.slot.clone(), channels, n: 0,
+            status: status.clone(), effects: effects::Processor::new(channels, rate),
+        });
         // The position counts samples handed to the device; it plays them a buffer later
         // (rodio asks for ~50 ms), plus the shared-mode device period (~10 ms).
         let rate = sink.config().sample_rate().get().max(1);
@@ -854,6 +865,8 @@ struct Bridge {
     inner: Option<MixerSource>,
     slot: Arc<std::sync::Mutex<Option<MixerSource>>>,
     channels: u16,
+    status: Arc<AudioStatus>,
+    effects: effects::Processor,
     /// Samples handed out, to give the mixer back on a frame boundary (else the next
     /// device would get the channels swapped).
     n: u64,
@@ -862,8 +875,16 @@ struct Bridge {
 impl Iterator for Bridge {
     type Item = rodio::Sample;
     fn next(&mut self) -> Option<Self::Item> {
+        let channels = u64::from(self.channels);
+        if self.n.is_multiple_of(channels * 256)
+            && let Ok(settings) = self.status.output_effects.try_read()
+        {
+            self.effects.update(*settings);
+        }
+        let channel = (self.n % channels) as usize;
         self.n += 1;
-        Some(self.inner.as_mut().and_then(Iterator::next).unwrap_or(0.0))
+        let sample = self.inner.as_mut().and_then(Iterator::next).unwrap_or(0.0);
+        Some(self.effects.sample(channel, sample))
     }
 }
 

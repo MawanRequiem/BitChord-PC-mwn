@@ -82,7 +82,7 @@ fn run(profile_dir: PathBuf) -> anyhow::Result<String> {
 
     let proxy = event_loop.create_proxy();
     let mut context = WebContext::new(Some(profile_dir));
-    let webview = crate::proxy::webview(WebViewBuilder::new_with_web_context(&mut context), false)
+    let webview = crate::proxy::webview(WebViewBuilder::new_with_web_context(&mut context))
         .with_initialization_script(BRIDGE)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(req.body().clone());

@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::Url;
+use reqwest::{Url, header::HeaderValue};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
@@ -158,11 +158,22 @@ impl Session {
         Ok(parts.join(" "))
     }
 
-    /// Add the signed-in headers for a request to `origin`.
+    /// Add signed-in headers only to the YouTube endpoints used by the app.
     pub fn sign(&self, req: reqwest::RequestBuilder, origin: &str) -> anyhow::Result<reqwest::RequestBuilder> {
-        let mut req = req
-            .header("Cookie", &self.cookie)
-            .header("Authorization", self.authorization(origin)?)
+        let (http, req) = req.build_split();
+        let req = req?;
+        let url = req.url();
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.port().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && matches!(url.host_str(), Some("music.youtube.com" | "www.youtube.com" | "s.youtube.com" | "upload.youtube.com")),
+            "unexpected destination for a signed YouTube request"
+        );
+        let mut req = reqwest::RequestBuilder::from_parts(http, req)
+            .header("Cookie", sensitive_header(&self.cookie)?)
+            .header("Authorization", sensitive_header(&self.authorization(origin)?)?)
             .header("X-Goog-AuthUser", self.session_index.to_string());
         if let Some(p) = &self.page_id {
             req = req.header("X-Goog-PageId", p);
@@ -212,14 +223,14 @@ impl Session {
     /// Ask Google for fresh session cookies, as an open YouTube tab does every few
     /// minutes: the `Set-Cookie` headers it answers with. Fails with [`Revoked`] when
     /// Google no longer knows the session.
-    pub async fn rotate(&self, http: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+    pub async fn rotate(&self) -> anyhow::Result<Vec<String>> {
         const ACCOUNTS: &str = "https://accounts.youtube.com";
-        let resp = http
+        let resp = crate::proxy::google_http()?
             .post(format!("{ACCOUNTS}/RotateCookies"))
             .header("User-Agent", UA)
             .header("Origin", ACCOUNTS)
             .header("Content-Type", "application/json")
-            .header("Cookie", &self.cookie)
+            .header("Cookie", sensitive_header(&self.cookie)?)
             .body(r#"[000,"-0000000000000000000"]"#)
             .timeout(std::time::Duration::from_secs(15))
             .send()
@@ -249,9 +260,9 @@ impl Session {
         self.login == other.login
     }
 
-    async fn post(&self, http: &reqwest::Client, origin: &str, endpoint: &str, client: (&str, &str, &str), body: Value) -> anyhow::Result<Value> {
+    async fn post(&self, origin: &str, endpoint: &str, client: (&str, &str, &str), body: Value) -> anyhow::Result<Value> {
         let (number, version, ua) = client;
-        let req = http
+        let req = crate::proxy::google_http()?
             .post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("User-Agent", ua)
             .header("X-YouTube-Client-Name", number)
@@ -271,12 +282,13 @@ impl Session {
 
     /// Upload an audio file to the account's library, like "Upload music" on
     /// music.youtube.com: a resumable upload, started and then sent in one go.
-    pub async fn upload(&self, http: &reqwest::Client, path: &Path) -> anyhow::Result<()> {
+    pub async fn upload(&self, path: &Path) -> anyhow::Result<()> {
         const ORIGIN: &str = "https://music.youtube.com";
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let p = path.to_owned();
         let bytes = tokio::task::spawn_blocking(move || std::fs::read(p)).await??;
         anyhow::ensure!(bytes.len() <= 300 * 1024 * 1024, "{name} is larger than 300 MB");
+        let http = crate::proxy::google_http()?;
         let req = |url: &str| -> anyhow::Result<reqwest::RequestBuilder> {
             let req = http
                 .post(url)
@@ -300,8 +312,9 @@ impl Session {
             .get("X-Goog-Upload-URL")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow::anyhow!("YouTube Music didn't accept the upload"))?
-            .to_owned();
-        req(&url)?
+            .parse::<Url>()?;
+        anyhow::ensure!(url.host_str() == Some("upload.youtube.com"), "unexpected YouTube Music upload destination");
+        req(url.as_str())?
             .header("X-Goog-Upload-Command", "upload, finalize")
             .header("X-Goog-Upload-Offset", "0")
             .body(bytes)
@@ -314,10 +327,10 @@ impl Session {
 
     /// Whether the account has YouTube Premium, read from the YouTube top bar logo
     /// the way yt-dlp does.
-    pub async fn is_premium(&self, http: &reqwest::Client) -> anyhow::Result<bool> {
+    pub async fn is_premium(&self) -> anyhow::Result<bool> {
         const WEB: &str = "2.20260708.00.00";
         let body = json!({"context": {"client": {"clientName": "WEB", "clientVersion": WEB, "hl": "en", "gl": "US"}}, "browseId": "FEwhat_to_watch"});
-        let resp = self.post(http, "https://www.youtube.com", "browse", ("1", WEB, UA), body).await?;
+        let resp = self.post("https://www.youtube.com", "browse", ("1", WEB, UA), body).await?;
         let logo = &resp["topbar"]["desktopTopbarRenderer"]["logo"]["topbarLogoRenderer"];
         Ok(logo["iconImage"]["iconType"] == "YOUTUBE_PREMIUM_LOGO"
             || logo["tooltipText"].to_string().to_lowercase().contains("premium"))
@@ -332,7 +345,7 @@ impl Session {
             "contentCheckOk": true,
             "racyCheckOk": true,
         });
-        let resp = self.post(http, "https://music.youtube.com", "player", ("67", VERSION, UA), body).await?;
+        let resp = self.post("https://music.youtube.com", "player", ("67", VERSION, UA), body).await?;
         let status = &resp["playabilityStatus"];
         if status["status"] != "OK" {
             anyhow::bail!("{}: {}", status["status"].as_str().unwrap_or("UNPLAYABLE"), status["reason"].as_str().unwrap_or("no reason given"));
@@ -375,9 +388,40 @@ impl Session {
     }
 }
 
+pub(super) fn sensitive_header(value: &str) -> anyhow::Result<HeaderValue> {
+    let mut header = HeaderValue::from_str(value)?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_requests_only_accept_youtube_https_destinations() {
+        let session = Session::new("SAPISID=test".to_owned(), 0, None);
+        let http = reqwest::Client::new();
+        let origin = "https://music.youtube.com";
+        for url in [
+            "http://music.youtube.com/",
+            "https://example.invalid/",
+            "https://music.youtube.com.example.invalid/",
+            "https://music.youtube.com:8443/",
+        ] {
+            assert!(session.sign(http.get(url), origin).is_err(), "{url}");
+        }
+        for url in [
+            "https://music.youtube.com/youtubei/v1/browse",
+            "https://www.youtube.com/api/stats/playback",
+            "https://s.youtube.com/api/stats/watchtime",
+            "https://upload.youtube.com/upload/usermusic/http",
+        ] {
+            let req = session.sign(http.get(url), origin).unwrap().build().unwrap();
+            assert!(req.headers()["cookie"].is_sensitive(), "{url}");
+            assert!(req.headers()["authorization"].is_sensitive(), "{url}");
+        }
+    }
 
     #[test]
     fn channels_of_one_sign_in_share_its_cookies() {

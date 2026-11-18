@@ -16,7 +16,7 @@ use crate::audio::{AudioCmd, AudioHandle};
 use crate::lyrics::{self, LyricsSet};
 use crate::model::{self, Card, Target, Thumb, Track, sized};
 use crate::stream::{self, Shared};
-use crate::{hires, innertube, jsc, webmusic, ytdlp, ytm, ytmapi};
+use crate::{hires, innertube, jsc, webmusic, ytm, ytmapi};
 
 pub enum Req {
     /// Home feed, optionally filtered by a mood chip's params.
@@ -967,7 +967,7 @@ impl Backend {
         let (mut done, mut failed) = (0, Vec::new());
         for f in files {
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            match session.upload(&self.http(), f).await {
+            match session.upload(f).await {
                 Ok(()) => done += 1,
                 Err(e) => {
                     log::warn!("upload {name}: {e:#}");
@@ -1470,13 +1470,9 @@ impl Backend {
             Err(e) if needs_account(&e) => {
                 log::info!("{video_id} needs a signed-in player ({e:#})");
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
-                if self.is_premium(&session).await {
-                    match self.resolve_from(Source::WebMusic, video_id, stream::Format::Aac, None).await {
-                        Ok(s) => return Ok((Source::WebMusic, s)),
-                        Err(e) => log::warn!("web music player failed ({e:#}); using yt-dlp"),
-                    }
-                }
-                Ok((Source::YtDlp, self.resolve_from(Source::YtDlp, video_id, stream::Format::Aac, None).await?))
+                anyhow::ensure!(self.is_premium(&session).await, "this track needs a signed-in stream with YouTube Music Premium");
+                let stream = self.resolve_from(Source::WebMusic, video_id, stream::Format::Aac, None).await?;
+                Ok((Source::WebMusic, stream))
             }
             Err(e) => Err(e),
         }
@@ -1501,14 +1497,6 @@ impl Backend {
             Source::WebMusic => {
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("signed out"))?;
                 plain(session.audio_stream(&self.http(), &self.jsc, video_id).await?, webmusic::UA)
-            }
-            Source::YtDlp => {
-                let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
-                let s = ytdlp::resolve(&self.http(), &self.data_dir, &session.cookie, video_id).await?;
-                // Cookies Google replaced while yt-dlp used the session.
-                self.api.keep(&session, s.replaced.iter().map(String::as_str));
-                // yt-dlp's JSON doesn't carry YouTube's loudness figure.
-                ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: s.user_agent, loudness_db: None, format: stream::Format::Aac, info: None, ranging: stream::Ranging::Query, data: None }
             }
             Source::HiRes => {
                 let track = track.ok_or_else(|| anyhow::anyhow!("no song to look up"))?;
@@ -1571,7 +1559,7 @@ impl Backend {
             Err(Some(at)) if at.elapsed() < PREMIUM_RETRY => return false,
             Err(_) => {}
         }
-        match session.is_premium(&self.http()).await {
+        match session.is_premium().await {
             Ok(p) => {
                 log::info!("account has Premium: {p}");
                 *premium = Ok(p);
@@ -1860,7 +1848,6 @@ fn reports_plays() -> bool {
 enum Source {
     VisionOs,
     WebMusic,
-    YtDlp,
     /// The listener's own addon server (see `hires`).
     HiRes,
 }

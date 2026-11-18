@@ -1,6 +1,6 @@
 //! Settings › Network › Proxy. Everything ytm-rs fetches goes through one setting:
 //! the API and song streams, lyrics, translation, updates, the Spotify transfer,
-//! yt-dlp, the sign-in windows and Listen together.
+//! the sign-in windows and Listen together.
 //!
 //! - System: whatever Windows is set to (Settings › Network › Proxy), else the
 //!   `HTTPS_PROXY`/`HTTP_PROXY` environment variables, else direct.
@@ -130,6 +130,7 @@ pub fn apply(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 /// 0 = no name (the proxy's own choice).
 static CIRCUIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HTTP: std::sync::RwLock<Option<reqwest::Client>> = std::sync::RwLock::new(None);
+static GOOGLE_HTTP: std::sync::Mutex<Option<(u32, reqwest::Client)>> = std::sync::Mutex::new(None);
 
 /// The client for YouTube Music and its streams. It's rebuilt when `new_circuit`
 /// picks another exit: pooled connections would otherwise stay on the old one.
@@ -141,6 +142,27 @@ pub fn http() -> reqwest::Client {
 }
 
 fn build_for(n: u32) -> reqwest::Client {
+    builder_for(n).build().unwrap_or_default()
+}
+
+/// Signed Google requests share the proxy exit but never follow redirects.
+pub fn google_http() -> reqwest::Result<reqwest::Client> {
+    let mut cached = GOOGLE_HTTP.lock().unwrap();
+    let circuit = CIRCUIT.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some((n, client)) = cached.as_ref()
+        && *n == circuit
+    {
+        return Ok(client.clone());
+    }
+    let client = builder_for(circuit)
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| attempt.error("Google session redirect refused")))
+        .build()?;
+    *cached = Some((circuit, client.clone()));
+    Ok(client)
+}
+
+fn builder_for(n: u32) -> reqwest::ClientBuilder {
     let b = match (n, active().resolve()) {
         (1.., Some(mut p)) => {
             let _ = p.set_username(&format!("ytm-rs-{n}"));
@@ -154,8 +176,6 @@ fn build_for(n: u32) -> reqwest::Client {
         // A server that stops sending mid-response; streams have their own, tighter check.
         .read_timeout(Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
-        .build()
-        .unwrap_or_default()
 }
 
 /// Whether the proxy can be asked for another exit: a SOCKS proxy without a sign-in
@@ -278,38 +298,24 @@ async fn relay_one(client: &mut TcpStream) -> anyhow::Result<()> {
 
 /// A sign-in window's webview. WebView2 follows Windows' proxy by itself, so only a
 /// custom proxy, or none at all, needs saying. (Chromium takes no password here: an
-/// authenticated proxy asks for it in the window.) `unbound`: no device-bound sessions
-/// (see `login::run`).
-pub fn webview(b: wry::WebViewBuilder<'_>, unbound: bool) -> wry::WebViewBuilder<'_> {
+/// authenticated proxy asks for it in the window.)
+pub fn webview(b: wry::WebViewBuilder<'_>) -> wry::WebViewBuilder<'_> {
     #[cfg(windows)]
     {
         use wry::WebViewBuilderExtWindows;
         // wry's own defaults, which these arguments replace.
         const DEFAULT: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
-        let features = if unbound { format!("{DEFAULT},DeviceBoundSessions,EnableBoundSessionCredentials") } else { DEFAULT.to_owned() };
         match (active(), active().resolve()) {
-            (Setting::Off, _) => return b.with_additional_browser_args(format!("{features} --no-proxy-server")),
+            (Setting::Off, _) => return b.with_additional_browser_args(format!("{DEFAULT} --no-proxy-server")),
             (Setting::Custom(_), Some(p)) => {
                 let scheme = if p.scheme().starts_with("socks") { "socks5" } else { p.scheme() };
                 let (host, port) = (p.host_str().unwrap_or_default(), p.port_or_known_default().unwrap_or(8080));
-                return b.with_additional_browser_args(format!("{features} --proxy-server={scheme}://{host}:{port}"));
+                return b.with_additional_browser_args(format!("{DEFAULT} --proxy-server={scheme}://{host}:{port}"));
             }
-            _ if unbound => return b.with_additional_browser_args(features),
             _ => {}
         }
     }
-    #[cfg(not(windows))]
-    let _ = unbound;
     b
-}
-
-/// For yt-dlp: `--proxy <url>`, or `--proxy ""` (direct) when the proxy is off.
-pub fn ytdlp_args() -> Vec<String> {
-    match (active(), active().resolve()) {
-        (_, Some(p)) => vec!["--proxy".into(), p.to_string()],
-        (Setting::Off, None) => vec!["--proxy".into(), String::new()],
-        _ => vec![],
-    }
 }
 
 /// A TCP connection to `host:port`, through the active proxy when there is one.

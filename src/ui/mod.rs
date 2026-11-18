@@ -63,6 +63,7 @@ pub enum Page {
     Downloads,
     Album(String),
     Playlist(String),
+    LocalPlaylist(String),
     Artist(String),
     Settings,
     /// Transfer from Spotify.
@@ -72,6 +73,7 @@ pub enum Page {
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum LibTab {
     Playlists,
+    Local,
     Songs,
     Albums,
     History,
@@ -118,6 +120,8 @@ pub enum Action {
     Collaborate,
     DeletePlaylist,
     SaveCollection(String, bool),
+    SaveLocal(crate::local_playlists::Playlist),
+    RemoveLocal(String),
     HomeChip(Option<String>),
     OpenNowPlaying(bool),
     /// Into the mini player (true) or back to the full window.
@@ -331,6 +335,7 @@ pub struct App {
     lists: Lists,
     artist: Option<ArtistPage>,
     library: Option<Library>,
+    local_playlists: Vec<crate::local_playlists::Playlist>,
     /// When the library was last requested; the sidebar spinner gives up after a while.
     library_requested: std::time::Instant,
     history: Option<Vec<Track>>,
@@ -373,6 +378,7 @@ pub struct App {
     /// The output device picked in settings (cpal's id and its name, for when it's not
     /// connected), and the devices last listed there.
     output_device: Option<(String, String)>,
+    output_effects: crate::audio::effects::Settings,
     output_devices: Vec<crate::audio::OutputDevice>,
     radio_pending: bool,
     seek_drag: Option<f32>,
@@ -634,6 +640,10 @@ impl App {
         if let Some(d) = &discord {
             d.set_prefs(discord_prefs.clone());
         }
+        let local_playlists = crate::local_playlists::load(backend.data_dir()).unwrap_or_else(|e| {
+            log::warn!("couldn't open local playlists: {e:#}");
+            Vec::new()
+        });
         let mut app = Self {
             backend,
             audio,
@@ -677,6 +687,7 @@ impl App {
             search: None,
             lists: Lists::default(),
             artist: None,
+            local_playlists,
             library: None,
             library_requested: std::time::Instant::now(),
             history: None,
@@ -707,6 +718,7 @@ impl App {
             play_songs: get("play_songs").is_none_or(|v| v == "1"),
             playing_as: None,
             output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
+            output_effects: get("output_effects").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             output_devices: Vec::new(),
             updater: None,
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
@@ -847,7 +859,7 @@ impl App {
         match std::env::var("YTM_PAGE").as_deref() {
             Ok("home") => app.go(Page::Home),
             Ok("new") | Ok("explore") => app.go(Page::New),
-            Ok("library") => app.go(Page::Library(LibTab::Playlists)),
+            Ok("library") => app.go(Page::Library(if app.logged_in { LibTab::Playlists } else { LibTab::Local })),
             Ok("uploads") => app.go(Page::Library(LibTab::Uploads)),
             Ok("liked") => app.go(Page::Library(LibTab::Songs)),
             Ok("history") => app.go(Page::Library(LibTab::History)),
@@ -891,6 +903,7 @@ impl App {
         }
         jam::dev_hooks(&mut app);
         app.audio.set_normalize(app.normalize);
+        app.audio.set_output_effects(app.output_effects);
         app.set_crossfade();
         app
     }
@@ -981,6 +994,7 @@ impl App {
                 }
                 None
             }
+            Page::Library(LibTab::Local) => None,
             Page::Library(_) if self.logged_in => Some(Req::Library),
             _ => None,
         };
@@ -1512,6 +1526,7 @@ impl eframe::App for App {
         let (device, device_name) = self.output_device.clone().unzip();
         storage.set_string("output_device", device.unwrap_or_default());
         storage.set_string("output_device_name", device_name.unwrap_or_default());
+        storage.set_string("output_effects", serde_json::to_string(&self.output_effects).unwrap_or_default());
         // eframe has just saved the window's geometry. Minimized or in the tray that's
         // 0×0 at -32000, which would reopen as a speck: keep the last real one instead.
         if self.window_hidden {

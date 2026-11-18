@@ -2,7 +2,7 @@
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
 
-use super::widgets::{self, icon_at, icon_button, named, paint_cover, text_at};
+use super::widgets::{self, icon_at, icon_button, named, paint_cover, pill, text_at};
 use super::{Action, App, LibTab, NpTab, Page, Repeat, fmt_time, glyphs};
 use crate::model::Target;
 use crate::shader::Params;
@@ -242,7 +242,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     nav(ui, glyphs::SEARCH, APPLE, "Search", Page::Search(String::new()), matches!(p, Page::Search(_)), &mut go_to);
     nav(ui, glyphs::HOME, APPLE, "Home", Page::Home, p == Page::Home, &mut go_to);
     nav(ui, glyphs::EXPLORE, APPLE, "New", Page::New, p == Page::New, &mut go_to);
-    nav(ui, glyphs::LIBRARY, APPLE, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
+    let library_tab = if app.logged_in { LibTab::Playlists } else { LibTab::Local };
+    nav(ui, glyphs::LIBRARY, APPLE, "Library", Page::Library(library_tab), matches!(p, Page::Library(_) | Page::LocalPlaylist(_)), &mut go_to);
     nav(ui, glyphs::DOWNLOAD, APPLE, "Downloads", Page::Downloads, p == Page::Downloads, &mut go_to);
 
     ui.add_space(14.0);
@@ -1115,6 +1116,14 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
         }
         let start = app.queue.index.unwrap_or(0);
         ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim())).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if pill(ui, "Save queue locally", Some(icon::LIBRARY), false).clicked() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+            app.actions.push(Action::SaveLocal(crate::local_playlists::Playlist {
+                id: format!("queue-{now}"),
+                title: format!("Queue · {}", app.queue.tracks[start].title),
+                tracks: app.queue.tracks.clone(),
+            }));
+        }
         ui.add_space(6.0);
         let (queue, liked, acts, has_current) = (&app.queue.tracks, &app.liked, &mut app.actions, app.queue.index.is_some());
         widgets::visible_rows(ui, queue.len() - start, |ui, k| {

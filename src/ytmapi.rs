@@ -137,7 +137,7 @@ impl Api {
         }
         self.take_in_replaced();
         let account = self.account().unwrap_or(account);
-        let set = account.rotate(&crate::proxy::http()).await?;
+        let set = account.rotate().await?;
         self.rotated_at.store(now, Relaxed);
         self.keep(&account, set.iter().map(String::as_str));
         Ok(())
@@ -409,7 +409,8 @@ impl Api {
             "request": {"useSsl": true},
             "user": {"lockedSafetyMode": false},
         });
-        let mut req = crate::proxy::http()
+        let http = if account.is_some() { crate::proxy::google_http()? } else { crate::proxy::http() };
+        let mut req = http
             .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("User-Agent", webmusic::UA)
             .header("Origin", ORIGIN)
@@ -454,7 +455,7 @@ impl Api {
     /// GET `url` as the signed-in account, the way the web player sends its stats pings.
     pub async fn get_signed_in(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<()> {
         let account = self.account().ok_or_else(|| anyhow::anyhow!("sign in first"))?;
-        let req = crate::proxy::http()
+        let req = crate::proxy::google_http()?
             .get(url)
             .query(query)
             .header("User-Agent", webmusic::UA)
@@ -470,10 +471,10 @@ impl Api {
 
     /// Check a signed-in cookie with YouTube and read which account/channel it is for.
     pub async fn session_from_cookie(&self, cookie: &str) -> anyhow::Result<Session> {
-        let resp = crate::proxy::http()
+        let resp = crate::proxy::google_http()?
             .get("https://www.youtube.com/results?search_query=")
             .header("User-Agent", webmusic::UA)
-            .header("Cookie", cookie)
+            .header("Cookie", webmusic::sensitive_header(cookie)?)
             .timeout(Duration::from_secs(15))
             .send()
             .await?;

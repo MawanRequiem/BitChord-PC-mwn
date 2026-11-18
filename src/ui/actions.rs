@@ -21,7 +21,8 @@ impl App {
         self.remember_search_click(&a);
         match a {
             // Clicking the song that's already playing pauses/resumes it, not restart it.
-            Action::Play(tracks, i) if tracks.get(i).is_some_and(|t| self.current_id() == Some(t.id.as_str())) && self.resume_at.is_none() => {
+            Action::Play(tracks, i) if !matches!(self.page, Page::LocalPlaylist(_))
+                && tracks.get(i).is_some_and(|t| self.current_id() == Some(t.id.as_str())) && self.resume_at.is_none() => {
                 self.toggle()
             }
             Action::Play(tracks, i) => {
@@ -189,6 +190,21 @@ impl App {
                     self.dialog = Some(Dialog::ConfirmDelete { id: c.id.clone(), title: c.title.clone() });
                 }
             }
+            Action::SaveLocal(playlist) => match crate::local_playlists::save(self.backend.data_dir(), playlist) {
+                Ok(playlists) => {
+                    self.local_playlists = playlists;
+                    self.toast("Saved to Local playlists");
+                }
+                Err(e) => self.toast(format!("Couldn't save local playlist: {e}")),
+            },
+            Action::RemoveLocal(id) => match crate::local_playlists::remove(self.backend.data_dir(), &id) {
+                Ok(playlists) => {
+                    self.local_playlists = playlists;
+                    self.go(Page::Library(LibTab::Local));
+                    self.toast("Removed local playlist");
+                }
+                Err(e) => self.toast(format!("Couldn't remove local playlist: {e}")),
+            },
             Action::SaveCollection(id, save) => {
                 if self.logged_in { self.backend.request(Req::SaveCollection { id, save }); }
                 else { self.toast("Sign in to save to library"); }
