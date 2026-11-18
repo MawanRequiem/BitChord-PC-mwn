@@ -1029,6 +1029,15 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
     });
     ui.add_space(12.0);
     if tab == LibTab::Local {
+        if app.takeout_import.is_some() {
+            ui.label(RichText::new("Importing Google Takeout…").color(theme::text_dim()));
+        } else if pill(ui, "Import Google Takeout", Some(icon::LIBRARY), false)
+            .on_hover_text("Open a Takeout ZIP or select exported playlist CSV files.")
+            .clicked()
+        {
+            app.choose_takeout_files(ui.ctx());
+        }
+        ui.add_space(8.0);
         if app.local_playlists.is_empty() {
             ui.label(RichText::new("Save a local copy from a playlist’s menu, or save your queue.").color(theme::text_dim()));
         }
@@ -1037,7 +1046,8 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                 if pill(ui, &playlist.title, Some(icon::LIBRARY), false).clicked() {
                     app.actions.push(Action::Go(Page::LocalPlaylist(playlist.id.clone())));
                 }
-                ui.label(RichText::new(format!("{} tracks", playlist.tracks.len())).color(theme::text_dim()));
+                let count = playlist.tracks.len();
+                ui.label(RichText::new(format!("{count} track{}", if count == 1 { "" } else { "s" })).color(theme::text_dim()));
             });
         }
         return;

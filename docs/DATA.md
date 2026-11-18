@@ -27,7 +27,7 @@ The app chooses `YTM_DATA_DIR` first, then a `data` directory beside a portable 
 | Location under the data directory | Contents |
 | --- | --- |
 | `app.ron` | eframe storage for window geometry and app settings. String values include source settings, theme/preferences, audio behavior, recent searches, sidebar caches, Jam IDs, and serialized queue/playback session state under `session`. |
-| `local-playlists.json` | Local playlist snapshots with a title and ordered track metadata. Updates use a process lock and replace the JSON file after writing the new content. The snapshot works without a Google account. Downloaded audio stays in the downloads folder. |
+| `local-playlists.json` | Local playlist snapshots with a title and ordered track metadata. Updates use a process lock and replace the JSON file after writing the new content. Snapshots can come from Google Takeout ZIP or CSV files. Downloaded audio stays in the downloads folder. |
 | `renderer`, `proxy` | Bootstrap text settings read before portions of the UI start. The proxy value can contain credential-bearing configuration. |
 | `ytmapi.json` | Cached YouTube Music web client/bootstrap data. |
 | `webview/`, `webview-spotify/`, `webview-lyrics/` | Browser profiles for Google, Spotify and lyric verification. They can contain provider session or browser state. |

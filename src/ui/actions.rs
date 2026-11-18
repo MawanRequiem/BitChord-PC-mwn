@@ -10,6 +10,50 @@ use super::queue::QueueFill;
 use super::{Action, App, Dialog, LibTab, NpTab, Page, jam, keys, nowplaying, shell, transfer};
 
 impl App {
+    pub(super) fn choose_takeout_files(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.takeout_import = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let paths = rfd::FileDialog::new()
+                .set_title("Import Google Takeout playlists")
+                .add_filter("Takeout ZIP or playlist CSV", &["zip", "csv"])
+                .pick_files();
+            if let Some(paths) = paths {
+                let _ = tx.send(crate::local_playlists::takeout::read(&paths));
+            }
+            drop(tx);
+            ctx.request_repaint();
+        });
+    }
+
+    pub(super) fn poll_takeout_import(&mut self) {
+        let Some(rx) = &self.takeout_import else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        };
+        self.takeout_import = None;
+        if let Some(result) = result {
+            match result.and_then(|import| {
+                let count = import.playlists.len();
+                let saved = crate::local_playlists::save_all(self.backend.data_dir(), import.playlists)?;
+                Ok((saved, count, import.track_count, import.skipped_rows))
+            }) {
+                Ok((saved, count, tracks, skipped)) => {
+                    self.local_playlists = saved;
+                    let mut message = format!("Imported {count} playlist{} with {tracks} track{}", if count == 1 { "" } else { "s" }, if tracks == 1 { "" } else { "s" });
+                    if skipped != 0 {
+                        message.push_str(&format!(" ({skipped} skipped)"));
+                    }
+                    self.toast(message);
+                }
+                Err(e) => self.toast(format!("Takeout import failed: {e:#}")),
+            }
+        }
+    }
+
     pub(super) fn apply(&mut self, a: Action) {
         // In a party only the host drives, the relay turns these down for us: say so
         // instead of clicking into nothing. Playing the current song stays ours (a pause).

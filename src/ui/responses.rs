@@ -15,6 +15,7 @@ use super::{Action, App, Dialog, HomeState, LibTab, MixFrom, Page, PlayingAs, Re
 
 impl App {
     pub(super) fn pump(&mut self, now: f64) {
+        self.poll_takeout_import();
         let cover = self.media_cover.lock().unwrap().take();
         // The listed track's art, with what plays's title, artists and length.
         if let Some((id, file)) = cover

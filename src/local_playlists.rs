@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Track;
 
+pub mod takeout;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Playlist {
     pub id: String,
@@ -20,11 +22,17 @@ pub fn load(dir: &Path) -> anyhow::Result<Vec<Playlist>> {
 }
 
 pub fn save(dir: &Path, playlist: Playlist) -> anyhow::Result<Vec<Playlist>> {
-    edit(dir, |playlists| {
-        if let Some(saved) = playlists.iter_mut().find(|saved| saved.id == playlist.id) {
-            *saved = playlist;
-        } else {
-            playlists.push(playlist);
+    save_all(dir, [playlist])
+}
+
+pub fn save_all(dir: &Path, imported: impl IntoIterator<Item = Playlist>) -> anyhow::Result<Vec<Playlist>> {
+    edit(dir, |stored| {
+        for playlist in imported {
+            if let Some(saved) = stored.iter_mut().find(|saved| saved.id == playlist.id) {
+                *saved = playlist;
+            } else {
+                stored.push(playlist);
+            }
         }
     })
 }

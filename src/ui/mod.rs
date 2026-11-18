@@ -336,6 +336,7 @@ pub struct App {
     artist: Option<ArtistPage>,
     library: Option<Library>,
     local_playlists: Vec<crate::local_playlists::Playlist>,
+    takeout_import: Option<Receiver<anyhow::Result<crate::local_playlists::takeout::Import>>>,
     /// When the library was last requested; the sidebar spinner gives up after a while.
     library_requested: std::time::Instant,
     history: Option<Vec<Track>>,
@@ -688,6 +689,7 @@ impl App {
             lists: Lists::default(),
             artist: None,
             local_playlists,
+            takeout_import: None,
             library: None,
             library_requested: std::time::Instant::now(),
             history: None,

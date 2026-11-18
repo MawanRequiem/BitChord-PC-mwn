@@ -1,6 +1,6 @@
 # BitChord PC developer guide
 
-This guide follows **MawanRequiem/BitChord-PC-mwn**, branch **rust-2.0**, at commit [c7936d871a915567054ae05d39adc4c0b88e1358](https://github.com/MawanRequiem/BitChord-PC-mwn/tree/c7936d871a915567054ae05d39adc4c0b88e1358). The desktop Cargo package is **bitchord 2.0.1**. The checkout also includes a separate Jam relay, its smoke client, and a static website.
+The architecture and function inventory for **MawanRequiem/BitChord-PC-mwn**, branch **rust-2.0**, use commit [c7936d871a915567054ae05d39adc4c0b88e1358](https://github.com/MawanRequiem/BitChord-PC-mwn/tree/c7936d871a915567054ae05d39adc4c0b88e1358) as their baseline. The desktop Cargo package is **bitchord 2.0.1**. The checkout also includes a separate Jam relay, its smoke client, and a static website.
 
 | Start here | What it covers |
 | --- | --- |
@@ -33,4 +33,11 @@ The review is based on local source and configuration. It covers call paths and 
 
 - Open **Settings → Playback** for the **16-band equalizer** and independent left/right levels. Each slider explains what boosting and cutting its frequency range does.
 - On a playlist, open **More → Save a local copy**. From the queue, use **Save queue locally**. Open either snapshot under **Library → Local playlists** while signed out. The app streams tracks that are absent from Downloads.
+- To import playlists from your Google account, choose **YouTube and YouTube Music** in [Google Takeout](https://takeout.google.com/) and select **playlists** from the included data. Download a ZIP archive. In **Library → Local playlists → Import Google Takeout**, select the ZIP or the extracted playlist CSV files. Takeout sometimes exports video IDs alone. The app shows those IDs when titles are missing. [Import code](../src/local_playlists/takeout.rs)
 - Google sign-in still imports session cookies. The fork leaves Windows device binding available, confines authenticated requests to approved HTTPS destinations, and keeps the session away from external playback helpers. Signing in can still require renewing the session.
+
+### Takeout import flow
+
+`App::choose_takeout_files` opens the file picker and parses the selection on a worker thread. `takeout::read` dispatches ZIP and CSV input, reads playlist CSV entries directly from ZIP, and preserves the order of valid video IDs. `App::poll_takeout_import` sends the parsed snapshots to `save_all`, which merges them into the existing local playlist file in one write. Re-importing identical playlist data updates the same snapshot. [Import parser](../src/local_playlists/takeout.rs) · [UI actions](../src/ui/actions.rs) · [Local storage](../src/local_playlists.rs)
+
+The importer reads UTF-8 CSV with a `Video ID` or `ID Video` column. For a ZIP whose folder names differ from `YouTube and YouTube Music/playlists`, extract the playlist CSV files and select them directly. The import reads local files. Playback resolves playable video IDs through the app's normal streaming or download path.
