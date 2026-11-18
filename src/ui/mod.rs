@@ -19,6 +19,7 @@ mod mini;
 mod notes;
 mod nowplaying;
 mod pages;
+mod palv;
 mod playback;
 mod queue;
 mod responses;
@@ -410,6 +411,9 @@ pub struct App {
     signature_waiting: std::collections::HashSet<String>,
     /// Settings › Playback: the listener's hi-res addon links, in the order given.
     hires_sources: Vec<String>,
+    hires_sources_dirty: bool,
+    hires_sources_save_failed: bool,
+    palv_renewal: palv::Renewal,
     /// The "+ Add a source" row is open.
     hires_adding: bool,
     /// What's typed in that row, before it's added.
@@ -618,7 +622,10 @@ impl App {
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
         // Before any request: a song started at launch must see the hi-res source too.
-        let hires_source = get("hires_source").unwrap_or_default();
+        let legacy_sources = get("hires_source").unwrap_or_default();
+        let saved_sources = crate::vault::get(crate::hires::SOURCES_SECRET, backend.data_dir()).and_then(|b| String::from_utf8(b).ok());
+        let hires_sources_dirty = saved_sources.is_none() && !legacy_sources.is_empty();
+        let hires_source = saved_sources.unwrap_or(legacy_sources);
         let hires_sources: Vec<String> = dedupe_hires(hires_source.lines().map(str::trim).filter(|l| !l.is_empty()));
         backend.set_hires_source(&hires_sources.join("\n"));
         let prefer_atmos = get("prefer_atmos").is_some_and(|v| v == "1");
@@ -776,6 +783,9 @@ impl App {
             signature_missed: Default::default(),
             signature_waiting: Default::default(),
             hires_sources,
+            hires_sources_dirty,
+            hires_sources_save_failed: false,
+            palv_renewal: palv::Renewal::new(get("auto_renew_palv").is_some_and(|v| v == "1")),
             hires_adding: false,
             hires_draft: String::new(),
             hires_focus: false,
@@ -1213,6 +1223,7 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(now);
+        self.tick_palv_renewal(ctx);
         self.skip_segments(ctx, now);
         // System media controls and taskbar buttons follow the player however it changed.
         let playing = self.playing() || self.buffering;
@@ -1578,7 +1589,10 @@ impl eframe::App for App {
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("animated_artwork", b(self.animated_artwork));
         storage.set_string("signature_api", self.signature_api.clone());
-        storage.set_string("hires_source", self.hires_sources.join("\n"));
+        if self.persist_hires_sources() {
+            storage.set_string("hires_source", String::new());
+        }
+        storage.set_string("auto_renew_palv", b(self.palv_renewal.enabled));
         storage.set_string("prefer_atmos", b(self.prefer_atmos));
         storage.set_string("show_nerd_stats", b(self.show_nerd_stats));
         storage.set_string("disable_direct_stream", b(self.disable_direct_stream));

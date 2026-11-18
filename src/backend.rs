@@ -69,6 +69,7 @@ pub enum Req {
     ArtistSignature { key: String, endpoint: String, name: String },
     /// Test a pasted hi-res source `link`; `key` is what the UI asked for.
     CheckHiResSource { key: String, link: String },
+    RenewPalv(String),
     /// Radio seeded from a track (`seed`, its id); appended to the queue. `song_of`: the
     /// track, when it's a music video to play as its song: the song's radio is asked for.
     Radio { seed: String, song_of: Option<Track> },
@@ -130,6 +131,7 @@ impl Req {
             Req::AppleCover { .. } => "Apple artwork",
             Req::ArtistSignature { .. } => "Artist signature",
             Req::CheckHiResSource { .. } => "Testing source",
+            Req::RenewPalv(_) => "Renewing Palv",
             Req::Radio { .. } => "Loading radio",
             Req::PlayCollection { .. } => "Playback",
             Req::Play { .. } => "Playback",
@@ -151,7 +153,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::Art { .. } | Req::AppleArtist { .. } | Req::AppleCover { .. } | Req::ArtistSignature { .. } | Req::CheckHiResSource { .. } | Req::Prefetch { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
+        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::Art { .. } | Req::AppleArtist { .. } | Req::AppleCover { .. } | Req::ArtistSignature { .. } | Req::CheckHiResSource { .. } | Req::RenewPalv(_) | Req::Prefetch { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
     }
 }
 
@@ -302,6 +304,7 @@ pub enum Resp {
     /// What a pasted hi-res source link really serves; `key` is what the UI asked with.
     /// Neither the summary nor the reason names the link, which carries a token.
     HiResSourceChecked { key: String, result: Result<String, String> },
+    PalvRenewed { link: String, result: Result<String, crate::palv::Failure> },
     Radio { seed: String, tracks: Vec<Track> },
     /// What was asked to play (a `Req::PlayCollection`), and its songs.
     PlayQueue { target: Target, tracks: Vec<Track> },
@@ -805,6 +808,10 @@ impl Backend {
                         Err(e) => log::warn!("hi-res source {host}: unusable: {e:#}"),
                     }
                     Resp::HiResSourceChecked { key, result: result.map_err(|e| e.to_string()) }
+                }
+                Req::RenewPalv(link) => {
+                    let result = crate::palv::renew(&link).await;
+                    Resp::PalvRenewed { link, result }
                 }
                 Req::Radio { seed, song_of } => {
                     // A music video's radio is music videos; its song's is songs, as from the

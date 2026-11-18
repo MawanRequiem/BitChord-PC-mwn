@@ -1521,6 +1521,17 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
         setting_row(ui, "Hi-Res audio", Some("Addon servers that serve hi-res copies of songs. When one has the song, its copy plays instead of YouTube's, and its quality shows in the player."), |_| {});
         ui.add_space(12.0);
         hires_sources_editor(app, ui);
+        if app.hires_sources_save_failed {
+            ui.colored_label(theme::RED, "BitChord couldn't save the new source URLs to the credential store.");
+        }
+        if app.palv_renewal.enabled || app.hires_sources.iter().any(|link| crate::palv::Session::from_link(link).is_some()) {
+            setting_row(ui, "Auto-renew Palv", Some("Renew the saved session about an hour before it expires while BitChord is running."), |ui| {
+                if toggle(ui, &mut app.palv_renewal.enabled, "Auto-renew Palv").changed() {
+                    app.palv_renewal.restart_scan();
+                    ui.ctx().request_repaint();
+                }
+            });
+        }
         ui.add_space(10.0);
         setting_row(ui, "Prefer Dolby Atmos", Some("Ask the hi-res sources for a Dolby Atmos copy when they offer one. Falls back to the best stereo copy when the stream's codec can't be decoded."), |ui| {
             if toggle(ui, &mut app.prefer_atmos, "Prefer Dolby Atmos").changed() {
@@ -1574,6 +1585,7 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
     let mut remove = None;
     for i in 0..app.hires_sources.len() {
         let link = app.hires_sources[i].trim().to_owned();
+        let palv = crate::palv::Session::from_link(&link);
         // Asked once the field is settled: testing on every keystroke would fire a
         // search and a stream at the addon for each character typed.
         let verdict = if link.is_empty() { None } else { app.hires_check(&link).cloned() };
@@ -1584,7 +1596,7 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
                 remove = Some(i);
             }
             ui.add_space(8.0);
-            if super::text_field(ui, "", &mut app.hires_sources[i], false, "https://your-addon.example").changed() {
+            if super::text_field(ui, "", &mut app.hires_sources[i], palv.is_some(), "https://your-addon.example").changed() {
                 edited = true;
             }
         });
@@ -1598,6 +1610,18 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(colour));
         }
+        if let Some(session) = palv {
+            let palv_link = session.manifest_link();
+            let (status, browser) = app.palv_renewal.status(&palv_link, &session);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(status).font(theme::regular(11.5)).color(theme::text_dim()));
+                if browser {
+                    ui.hyperlink_to("Open Palv", crate::palv::DASHBOARD);
+                } else if !app.palv_renewal.running(&palv_link) && ui.small_button("Renew now").clicked() {
+                    app.start_palv_renewal(palv_link, false);
+                }
+            });
+        }
         ui.add_space(6.0);
     }
     if let Some(i) = remove {
@@ -1606,10 +1630,11 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
     }
     if edited {
         app.hires_sources = super::dedupe_hires(app.hires_sources.iter().map(String::as_str));
-        app.backend.set_hires_source(&live_sources(app));
+        app.hires_sources_changed();
     }
     if app.hires_adding {
-        let resp = super::text_field(ui, "", &mut app.hires_draft, false, "https://your-addon.example");
+        let mask = crate::palv::Session::from_link(&app.hires_draft).is_some();
+        let resp = super::text_field(ui, "", &mut app.hires_draft, mask, "https://your-addon.example");
         if app.hires_focus {
             resp.request_focus();
             app.hires_focus = false;
@@ -1621,7 +1646,7 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
             if !link.is_empty() {
                 app.hires_sources.push(link);
                 app.hires_sources = super::dedupe_hires(app.hires_sources.iter().map(String::as_str));
-                app.backend.set_hires_source(&live_sources(app));
+                app.hires_sources_changed();
             }
             app.hires_draft.clear();
             app.hires_adding = false;
@@ -1632,11 +1657,6 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
         app.hires_focus = true;
         app.hires_draft.clear();
     }
-}
-
-/// The non-empty links as one newline-separated list, the way the backend reads them.
-fn live_sources(app: &App) -> String {
-    app.hires_sources.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 /// Settings › Downloads.

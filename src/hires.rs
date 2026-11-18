@@ -34,6 +34,7 @@ fn use_release_agent() {
 }
 
 const TIER: &str = "LOSSLESS";
+pub const SOURCES_SECRET: &str = "hi-res source URLs";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 /// `/stream` makes the addon resolve the song with its own upstream, which takes several
 /// seconds on a cold lookup; cutting it at the search's timeout throws away good copies.

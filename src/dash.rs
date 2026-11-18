@@ -474,9 +474,13 @@ mod tests {
     fn live_blinding_lights_atmos_decodes_to_playable_pcm() {
         // Reads the local hires source and fetches a real Tidal Atmos stream.
         // Never committed with secrets; run manually when debugging.
-        let data = std::fs::read(directories::ProjectDirs::from("", "", "ytm-rs").unwrap().data_dir().join("app.ron")).unwrap();
-        let text = String::from_utf8_lossy(&data);
-        let base = text.split("\"hires_source\":").nth(1).and_then(|s| s.split('"').nth(1)).unwrap().replace("\\n", "\n").lines().next().unwrap().to_owned();
+        let data_dir = crate::data_dir();
+        let saved = crate::vault::get(crate::hires::SOURCES_SECRET, &data_dir).and_then(|data| String::from_utf8(data).ok());
+        let sources = saved.unwrap_or_else(|| {
+            let text = std::fs::read_to_string(data_dir.join("app.ron")).unwrap();
+            text.split("\"hires_source\":").nth(1).and_then(|s| s.split('"').nth(1)).unwrap().replace("\\n", "\n")
+        });
+        let base = crate::hires::normalize_base(sources.lines().next().expect("configure a hi-res source first"));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let http = reqwest::Client::new();

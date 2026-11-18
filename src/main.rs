@@ -27,6 +27,7 @@ mod media;
 mod model;
 mod motion;
 mod opus;
+mod palv;
 mod preset;
 mod shader;
 mod sponsorblock;

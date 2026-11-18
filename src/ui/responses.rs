@@ -362,6 +362,7 @@ impl App {
                 self.hires_checking.remove(&key);
                 self.hires_checks.insert(key, result);
             }
+            Resp::PalvRenewed { link, result } => self.finish_palv_renewal(link, result),
             Resp::AppleCover { key, motion } => {
                 self.apple_waiting.remove(&key);
                 match motion.and_then(|m| m.square) {
