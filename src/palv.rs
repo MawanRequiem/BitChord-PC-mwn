@@ -10,6 +10,10 @@ use serde::Deserialize;
 pub const DASHBOARD: &str = "https://addon.palv.org/";
 const RENEW_BEFORE_SECS: u64 = 60 * 60;
 
+pub fn is_palv_link(link: &str) -> bool {
+    url::Url::parse(link.trim()).is_ok_and(|url| url.host_str() == Some("addon.palv.org"))
+}
+
 pub struct Session {
     token: String,
     expires_at: u64,
@@ -184,6 +188,14 @@ mod tests {
         ] {
             assert!(Session::from_link(&url).is_none());
         }
+    }
+
+    #[test]
+    fn an_opaque_palv_source_is_identified_without_guessing_its_expiration() {
+        let link = "https://addon.palv.org/opaque-session/manifest.json";
+        assert!(is_palv_link(link));
+        assert!(Session::from_link(link).is_none());
+        assert!(!is_palv_link("https://addon.palv.org.example.test/session"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod actions;
 mod collections;
 mod dev;
 mod dialogs;
+mod equalizer;
 mod glyphs;
 mod integrations;
 mod jam;
@@ -561,6 +562,7 @@ pub struct App {
     coll_search: Option<(String, String)>,
     /// What's typed in the box above Settings; the page keeps only what it matches.
     settings_search: String,
+    settings_category: pages::SettingsCategory,
     /// The keyboard shortcuts, with what the user changed over the defaults.
     keys: keys::Map,
     /// The shortcut row waiting for a key, if one is being recorded.
@@ -742,6 +744,7 @@ impl App {
             hidden_playlists: get("hidden_playlists").map(|v| v.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
             coll_search: None,
             settings_search: String::new(),
+            settings_category: pages::SettingsCategory::Playback,
             keys: keys::Map::default(),
             keys_edit: None,
             jam_server: String::new(),
@@ -889,6 +892,7 @@ impl App {
         }
         // Dev hook: YTM_PROXY_INPUT=<address> opens Settings › Network on Custom with it typed in.
         if let Some(v) = dev_var("YTM_PROXY_INPUT") {
+            app.settings_category = pages::SettingsCategory::Network;
             app.proxy_mode = crate::proxy::Setting::Custom(String::new());
             app.proxy_url = v.to_owned();
         }

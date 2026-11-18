@@ -36,7 +36,7 @@ pub enum AudioCmd {
     /// Seek to where `pos` will have moved on to by the time the seek lands (`pos` was
     /// current at `at`): following someone else's playback (listen together).
     SeekLive { pos: Duration, at: std::time::Instant },
-    Volume(f32),
+    NormalizeVolume,
     /// The output device failed (unplugged, headphones disconnected): sent by the
     /// device's error callback so the audio thread reopens one.
     DeviceLost,
@@ -64,6 +64,7 @@ fn now_ms() -> u64 {
 #[derive(Default)]
 pub struct AudioStatus {
     output_effects: std::sync::RwLock<effects::Settings>,
+    eq_headroom_db: AtomicU32,
     pub position_ms: AtomicU64,
     /// When `position_ms` was sampled (ms since EPOCH), for smooth extrapolation.
     sampled_at: AtomicU64,
@@ -565,6 +566,10 @@ impl AudioHandle {
         *self.status.output_effects.write().unwrap() = settings;
     }
 
+    pub fn eq_headroom_db(&self) -> f32 {
+        f32::from_bits(self.status.eq_headroom_db.load(Ordering::Relaxed))
+    }
+
     pub fn send(&self, cmd: AudioCmd) {
         let _ = self.tx.send(cmd);
     }
@@ -575,7 +580,7 @@ impl AudioHandle {
 
     pub fn set_normalize(&self, on: bool) {
         self.status.normalize.store(on, Ordering::Relaxed);
-        self.send(AudioCmd::Volume(self.volume()));
+        self.send(AudioCmd::NormalizeVolume);
     }
 
     /// Switches the slider's curve, moving it so the music stays as loud as it was.
@@ -584,7 +589,6 @@ impl AudioHandle {
             let v = self.volume();
             self.status.volume.store(if on { v.cbrt() } else { v.powi(3) }.to_bits(), Ordering::Relaxed);
         }
-        self.send(AudioCmd::Volume(self.volume()));
     }
 
     pub fn set_crossfade(&self, secs: u32) {
@@ -598,7 +602,6 @@ impl AudioHandle {
 
     pub fn set_volume(&self, v: f32) {
         self.status.volume.store(v.to_bits(), Ordering::Relaxed);
-        self.send(AudioCmd::Volume(v));
     }
 }
 
@@ -879,7 +882,9 @@ impl Iterator for Bridge {
         if self.n.is_multiple_of(channels * 256)
             && let Ok(settings) = self.status.output_effects.try_read()
         {
-            self.effects.update(*settings);
+            let volume = f32::from_bits(self.status.volume.load(Ordering::Relaxed));
+            self.effects.update(*settings, slider_gain(&self.status, volume));
+            self.status.eq_headroom_db.store(self.effects.headroom_db().to_bits(), Ordering::Relaxed);
         }
         let channel = (self.n % channels) as usize;
         self.n += 1;
@@ -928,7 +933,7 @@ pub fn spawn(volume: f32, log_volume: bool, device: Option<String>, events: Send
         .name("audio".into())
         .spawn({
             let tx = tx.clone();
-            move || run(rx, tx, st, volume, device, events, wake)
+            move || run(rx, tx, st, device, events, wake)
         })
         .expect("spawn audio thread");
     AudioHandle { tx, status }
@@ -938,7 +943,6 @@ fn run(
     rx: Receiver<AudioCmd>,
     tx: Sender<AudioCmd>,
     status: Arc<AudioStatus>,
-    volume: f32,
     device: Option<String>,
     events: Sender<AudioEvent>,
     wake: impl Fn(),
@@ -949,7 +953,6 @@ fn run(
         wake();
     }
     let mut player = Player::connect_new(&output.mixer);
-    player.set_volume(slider_gain(&status, volume));
     // The playing source's fade-out control (see `Meter`).
     let mut fade_out = Arc::new(AtomicU32::new(0));
     // Songs fading out under the current one (more than one only for a moment).
@@ -991,7 +994,7 @@ fn run(
                 player.clear();
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
-                player.set_volume(slider_gain(&status, f32::from_bits(status.volume.load(Ordering::Relaxed))) * gain);
+                player.set_volume(gain);
                 // Fade in only over a song still playing, both over the same length.
                 fading.retain(|f| {
                     if f.player.empty() {
@@ -1079,7 +1082,7 @@ fn run(
                 }
                 let gain = norm_gain(&status, Some(&*s));
                 log::info!("audio: hi-res loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
-                player.set_volume(slider_gain(&status, f32::from_bits(status.volume.load(Ordering::Relaxed))) * gain);
+                player.set_volume(gain);
                 fade_out = Arc::new(AtomicU32::new(0));
                 let fade_in = if !paused { QUICK_FADE_MS } else { 0 };
                 let analysis = s.tempo.clone();
@@ -1239,11 +1242,10 @@ fn run(
                     output.open(tx.clone(), &status);
                 }
             }
-            Ok(AudioCmd::Volume(v)) => {
-                let v = slider_gain(&status, v);
-                player.set_volume(v * norm_gain(&status, shared.as_deref()));
+            Ok(AudioCmd::NormalizeVolume) => {
+                player.set_volume(norm_gain(&status, shared.as_deref()));
                 for f in &fading {
-                    f.player.set_volume(v * norm_gain(&status, f.shared.as_deref()));
+                    f.player.set_volume(norm_gain(&status, f.shared.as_deref()));
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}

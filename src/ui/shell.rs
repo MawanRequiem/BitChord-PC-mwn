@@ -242,8 +242,10 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     nav(ui, glyphs::SEARCH, APPLE, "Search", Page::Search(String::new()), matches!(p, Page::Search(_)), &mut go_to);
     nav(ui, glyphs::HOME, APPLE, "Home", Page::Home, p == Page::Home, &mut go_to);
     nav(ui, glyphs::EXPLORE, APPLE, "New", Page::New, p == Page::New, &mut go_to);
-    let library_tab = if app.logged_in { LibTab::Playlists } else { LibTab::Local };
-    nav(ui, glyphs::LIBRARY, APPLE, "Library", Page::Library(library_tab), matches!(p, Page::Library(_) | Page::LocalPlaylist(_)), &mut go_to);
+    if app.logged_in {
+        nav(ui, glyphs::LIBRARY, APPLE, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(tab) if tab != LibTab::Local), &mut go_to);
+    }
+    nav(ui, glyphs::LIBRARY, APPLE, "Local playlists", Page::Library(LibTab::Local), matches!(p, Page::Library(LibTab::Local) | Page::LocalPlaylist(_)), &mut go_to);
     nav(ui, glyphs::DOWNLOAD, APPLE, "Downloads", Page::Downloads, p == Page::Downloads, &mut go_to);
 
     ui.add_space(14.0);

@@ -708,7 +708,7 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
             // Saving only applies to someone else's playlist or an album.
             let save_id = if is_album { c.save_id.clone() } else { (!c.owned).then(|| id.to_owned()) };
             let owned = !is_album && c.owned;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
                 play_pill(ui, acts, &target, tracks);
                 if circle_action(ui, CircleGlyph::Char(icon::SHUFFLE), "Shuffle", false).clicked() && !tracks.is_empty() {
@@ -732,15 +732,6 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                         && widgets::menu_action(ui, Some(icon::LIBRARY), if saved { "Remove from library" } else { "Save to library" })
                     {
                         acts.push(Action::SaveCollection(save_id, !saved));
-                    }
-                    if !is_album && !tracks.is_empty() && !more
-                        && widgets::menu_action(ui, Some(icon::LIBRARY), "Save a local copy")
-                    {
-                        acts.push(Action::SaveLocal(crate::local_playlists::Playlist {
-                            id: format!("youtube-{id}"),
-                            title: c.title.clone(),
-                            tracks: tracks.clone(),
-                        }));
                     }
                     if app.logged_in && !auto && !tracks.is_empty() {
                         if widgets::menu_action(ui, Some(icon::LIST_CHECKS), if selecting { "Done selecting" } else { "Select" }) {
@@ -769,6 +760,19 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                     }
                     ui.add_space(3.0);
                 });
+                if !is_album {
+                    let local_id = format!("youtube-{id}");
+                    let saved_local = app.local_playlists.iter().any(|playlist| playlist.id == local_id);
+                    let label = if saved_local { "Update local playlist" } else { "Save playlist locally" };
+                    let button = ui.add_enabled_ui(!more && !tracks.is_empty(), |ui| pill(ui, label, Some(icon::LIBRARY), false)).inner;
+                    if button.on_disabled_hover_text(if more { "Wait for all tracks to load." } else { "This playlist has no tracks to save." }).clicked() {
+                        acts.push(Action::SaveLocal(crate::local_playlists::Playlist {
+                            id: local_id,
+                            title: c.title.clone(),
+                            tracks: tracks.clone(),
+                        }));
+                    }
+                }
             });
             if toggle_search {
                 let closing = app.coll_search.as_ref().is_some_and(|(fid, _)| fid == id);
@@ -1039,7 +1043,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
         }
         ui.add_space(8.0);
         if app.local_playlists.is_empty() {
-            ui.label(RichText::new("Save a local copy from a playlist’s menu, or save your queue.").color(theme::text_dim()));
+            ui.label(RichText::new("Use Save playlist locally on a playlist, or save your queue.").color(theme::text_dim()));
         }
         for playlist in &app.local_playlists {
             ui.horizontal_wrapped(|ui| {
@@ -1240,6 +1244,29 @@ struct SettingsSearch {
 #[derive(Clone, Default)]
 struct SettingsRows(Vec<(String, String, String)>);
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum SettingsCategory {
+    Playback,
+    Sources,
+    Account,
+    Appearance,
+    Network,
+    Integrations,
+    Shortcuts,
+}
+
+impl SettingsCategory {
+    const ALL: [(Self, &'static str); 7] = [
+        (Self::Playback, "Playback"),
+        (Self::Sources, "Sources"),
+        (Self::Account, "Account"),
+        (Self::Appearance, "Appearance"),
+        (Self::Network, "Network"),
+        (Self::Integrations, "Integrations"),
+        (Self::Shortcuts, "Shortcuts"),
+    ];
+}
+
 fn search_key() -> egui::Id {
     egui::Id::new("bitchord-settings-search")
 }
@@ -1277,8 +1304,10 @@ pub(super) fn settings_row_shown(ui: &mut Ui, title: &str, desc: &str) -> bool {
         let section = s.section.clone();
         ui.data_mut(|d| {
             let mut rows = d.get_temp::<SettingsRows>(rows_key()).unwrap_or_default();
-            rows.0.push((section, title.to_owned(), desc.to_owned()));
-            d.insert_temp(rows_key(), rows);
+            if !rows.0.iter().any(|(group, row, details)| *group == section && row == title && details == desc) {
+                rows.0.push((section, title.to_owned(), desc.to_owned()));
+                d.insert_temp(rows_key(), rows);
+            }
         });
         return true;
     }
@@ -1287,10 +1316,6 @@ pub(super) fn settings_row_shown(ui: &mut Ui, title: &str, desc: &str) -> bool {
 
 fn settings(app: &mut App, ui: &mut Ui) {
     let words: Vec<String> = app.settings_search.split_whitespace().map(str::to_lowercase).collect();
-    // The page drawn whole is what the box searches; a filtered one leaves that list alone.
-    if words.is_empty() {
-        ui.data_mut(|d| d.insert_temp(rows_key(), SettingsRows::default()));
-    }
     put_search(ui, &SettingsSearch { words, ..Default::default() });
     // One centred column; every section shares its width.
     let avail = ui.available_width();
@@ -1324,18 +1349,70 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     }
     page_title(ui, "Settings");
     settings_search_bar(ui, &mut app.settings_search);
-    settings_account(app, ui);
-    settings_playback(app, ui);
-    settings_downloads(ui);
-    settings_lyrics(app, ui);
-    settings_artists(app, ui);
-    settings_appearance(app, ui);
-    settings_window(app, ui);
-    settings_connections(app, ui);
-    section_label(ui, "Network", None);
-    settings_card(ui, |ui| network(app, ui));
-    super::transfer::settings_section(app, ui);
-    settings_shortcuts(app, ui);
+    let search = search_of(ui);
+    let index_key = egui::Id::unique("settings-index-inputs");
+    type IndexInputs = (Vec<String>, bool, bool, bool, bool);
+    let inputs: IndexInputs = (search.words.clone(), app.logged_in, show_channel_setting(app), app.automix, app.crossfade);
+    if ui.data(|d| d.get_temp::<IndexInputs>(index_key)).as_ref() != Some(&inputs) {
+        // Search over every category, including controls that appeared since sign-in.
+        ui.data_mut(|d| {
+            d.insert_temp(index_key, inputs);
+            d.insert_temp(rows_key(), SettingsRows::default());
+        });
+        let mut index = ui.new_child(egui::UiBuilder::new().invisible());
+        put_search(&index, &SettingsSearch::default());
+        for (category, _) in SettingsCategory::ALL {
+            settings_category(app, &mut index, category);
+        }
+        put_search(ui, &search);
+    }
+    ui.add_space(12.0);
+    ui.horizontal_wrapped(|ui| {
+        for (category, title) in SettingsCategory::ALL {
+            if chip(ui, title, search.words.is_empty() && app.settings_category == category).clicked() {
+                app.settings_category = category;
+                app.settings_search.clear();
+                put_search(ui, &SettingsSearch::default());
+            }
+        }
+    });
+    if search_of(ui).words.is_empty() {
+        settings_category(app, ui, app.settings_category);
+    } else {
+        for (category, _) in SettingsCategory::ALL {
+            settings_category(app, ui, category);
+        }
+    }
+}
+
+fn settings_category(app: &mut App, ui: &mut Ui, category: SettingsCategory) {
+    match category {
+        SettingsCategory::Playback => {
+            section_label(ui, "Sound controls", None);
+            settings_card(ui, |ui| output_effects(app, ui));
+            settings_playback(app, ui);
+        }
+        SettingsCategory::Sources => {
+            settings_sources(app, ui);
+            settings_downloads(ui);
+        }
+        SettingsCategory::Account => settings_account(app, ui),
+        SettingsCategory::Appearance => {
+            settings_appearance(app, ui);
+            settings_window(app, ui);
+            settings_lyrics(app, ui);
+            settings_artists(app, ui);
+        }
+        SettingsCategory::Network => {
+            section_label(ui, "Network", None);
+            settings_card(ui, |ui| network(app, ui));
+        }
+        SettingsCategory::Integrations => {
+            settings_connections(app, ui);
+            super::transfer::settings_section(app, ui);
+        }
+        SettingsCategory::Shortcuts => settings_shortcuts(app, ui),
+    }
 }
 
 /// The box above Settings: what's typed in it leaves only the sections and rows that say
@@ -1374,7 +1451,7 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
     let (mut sign_in, mut sign_out) = (false, false);
     // Asked again now and then while Settings shows: a failed ask, or a channel made since.
     let now = ui.input(|i| i.time);
-    if app.logged_in && app.channels_asked.is_none_or(|at| now - at > 60.0) {
+    if ui.is_visible() && app.logged_in && app.channels_asked.is_none_or(|at| now - at > 60.0) {
         app.channels_asked = Some(now);
         app.backend.request(crate::backend::Req::Channels);
     }
@@ -1385,7 +1462,7 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
                 sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
             });
             // Also with one, when the one in use isn't it (a brand channel since deleted).
-            if app.channels.as_ref().is_some_and(|c| c.list.len() > 1 || !c.list.iter().any(|l| l.page_id == c.current)) {
+            if show_channel_setting(app) {
                 divider(ui);
                 setting_row(ui, "Channel", Some("Your Google account and each YouTube channel it manages have their own library, likes, history and recommendations."), |ui| {
                     channel_picker(app, ui);
@@ -1416,6 +1493,10 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
     if sign_out {
         app.backend.request(crate::backend::Req::Logout);
     }
+}
+
+fn show_channel_setting(app: &App) -> bool {
+    app.channels.as_ref().is_some_and(|c| c.list.len() > 1 || !c.list.iter().any(|l| l.page_id == c.current))
 }
 
 fn channel_picker(app: &mut App, ui: &mut Ui) {
@@ -1488,8 +1569,6 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
             output_device_picker(app, ui);
         });
         divider(ui);
-        output_effects(app, ui);
-        divider(ui);
         setting_row(ui, "Automix", Some("Slide from one song into the next the way a DJ would: both hold their level for a moment, then swap in one smooth move, instead of a straight fade. The mix picks its own length, in phrases of 8 or 16 bars (16 on long songs), following the beat it hears."), |ui| {
             if toggle(ui, &mut app.automix, "Automix").changed() {
                 app.set_crossfade();
@@ -1517,20 +1596,36 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
                 app.request_segments();
             }
         });
-        divider(ui);
-        setting_row(ui, "Hi-Res audio", Some("Addon servers that serve hi-res copies of songs. When one has the song, its copy plays instead of YouTube's, and its quality shows in the player."), |_| {});
-        ui.add_space(12.0);
-        hires_sources_editor(app, ui);
-        if app.hires_sources_save_failed {
-            ui.colored_label(theme::RED, "BitChord couldn't save the new source URLs to the credential store.");
+    });
+}
+
+fn settings_sources(app: &mut App, ui: &mut Ui) {
+    section_label(ui, "Hi-Res sources", None);
+    settings_card(ui, |ui| {
+        let supported = app.hires_sources.iter().any(|link| crate::palv::Session::from_link(link).is_some());
+        let label = "Palv add-on renewal";
+        let desc = "Renew now or set up automatic renewal for your Palv source.";
+        if settings_row_shown(ui, label, desc) && !app.hires_sources.iter().any(|link| crate::palv::is_palv_link(link)) {
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Palv").font(theme::semibold(15.0)));
+                open_palv_button(ui);
+                ui.label(RichText::new("Add your personalized Palv URL to enable automatic renewal.").color(theme::text_dim()));
+            });
         }
-        if app.palv_renewal.enabled || app.hires_sources.iter().any(|link| crate::palv::Session::from_link(link).is_some()) {
-            setting_row(ui, "Auto-renew Palv", Some("Renew the saved session about an hour before it expires while BitChord is running."), |ui| {
+        setting_row(ui, "Auto-renew Palv", Some("Checks the saved session while BitChord is running and renews near expiry."), |ui| {
+            ui.add_enabled_ui(supported, |ui| {
                 if toggle(ui, &mut app.palv_renewal.enabled, "Auto-renew Palv").changed() {
                     app.palv_renewal.restart_scan();
                     ui.ctx().request_repaint();
                 }
             });
+        });
+        if search_of(ui).all || settings_hit("hi-res source add-on addons palv renew now renewal auto-renew", &search_of(ui).words) {
+            hires_sources_editor(app, ui);
+            if app.hires_sources_save_failed {
+                ui.colored_label(theme::RED, "BitChord couldn't save the new source URLs to the credential store.");
+            }
         }
         ui.add_space(10.0);
         setting_row(ui, "Prefer Dolby Atmos", Some("Ask the hi-res sources for a Dolby Atmos copy when they offer one. Falls back to the best stereo copy when the stream's codec can't be decoded."), |ui| {
@@ -1549,31 +1644,21 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
 fn output_effects(app: &mut App, ui: &mut Ui) {
     let settings = &mut app.output_effects;
     let before = *settings;
+    if settings_row_shown(ui, "Equalizer (16 bands)", "EQ bass midrange treble frequency gain presets headroom clipping protection") {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Equalizer · 16 bands").font(theme::semibold(15.0)));
+        super::equalizer::show(ui, settings, app.audio.eq_headroom_db());
+        ui.add_space(7.0);
+        divider(ui);
+    }
     for (label, volume) in [("Left volume", &mut settings.left), ("Right volume", &mut settings.right)] {
         setting_row(ui, label, None, |ui| {
             ui.add(egui::Slider::new(volume, 0..=100).suffix("%")).on_hover_text(label);
         });
     }
-    if settings_row_shown(ui, "Equalizer (16 bands)", "EQ bass midrange treble frequency gain") {
-        let search = search_of(ui);
-        let searching = !search.words.is_empty();
-        egui::CollapsingHeader::new("Equalizer (16 bands)").open(searching.then_some(true)).show(ui, |ui| {
-            if searching {
-                put_search(ui, &SettingsSearch { all: true, ..search.clone() });
-            }
-            for ((_, label, help), gain) in crate::audio::effects::BANDS.into_iter().zip(&mut settings.bands) {
-                setting_row(ui, label, Some(help), |ui| {
-                    ui.add(egui::Slider::new(gain, -12..=12).suffix(" dB")).on_hover_text(label);
-                });
-            }
-            if pill(ui, "Reset equalizer", None, false).clicked() {
-                settings.bands.fill(0);
-            }
-            put_search(ui, &search);
-        });
-    }
     if *settings != before {
         app.audio.set_output_effects(*settings);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(35));
     }
 }
 
@@ -1585,10 +1670,10 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
     let mut remove = None;
     for i in 0..app.hires_sources.len() {
         let link = app.hires_sources[i].trim().to_owned();
-        let palv = crate::palv::Session::from_link(&link);
         // Asked once the field is settled: testing on every keystroke would fire a
         // search and a stream at the addon for each character typed.
-        let verdict = if link.is_empty() { None } else { app.hires_check(&link).cloned() };
+        let from_palv = crate::palv::is_palv_link(&link);
+        let verdict = if link.is_empty() || !ui.is_visible() { None } else { app.hires_check(&link).cloned() };
         // Fixed-height row so the × sits at the same height on every line, whatever
         // verdict text appears; the verdict goes below the row, not inside it.
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 42.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1596,7 +1681,7 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
                 remove = Some(i);
             }
             ui.add_space(8.0);
-            if super::text_field(ui, "", &mut app.hires_sources[i], palv.is_some(), "https://your-addon.example").changed() {
+            if super::text_field(ui, "", &mut app.hires_sources[i], from_palv, "https://your-addon.example").changed() {
                 edited = true;
             }
         });
@@ -1610,15 +1695,21 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(colour));
         }
-        if let Some(session) = palv {
-            let palv_link = session.manifest_link();
-            let (status, browser) = app.palv_renewal.status(&palv_link, &session);
+        if from_palv {
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(status).font(theme::regular(11.5)).color(theme::text_dim()));
-                if browser {
-                    ui.hyperlink_to("Open Palv", crate::palv::DASHBOARD);
-                } else if !app.palv_renewal.running(&palv_link) && ui.small_button("Renew now").clicked() {
-                    app.start_palv_renewal(palv_link, false);
+                if let Some(session) = crate::palv::Session::from_link(&link) {
+                    let link = session.manifest_link();
+                    let (status, browser) = app.palv_renewal.status(&link, &session);
+                    if browser {
+                        open_palv_button(ui);
+                    } else if ui.add_enabled_ui(!app.palv_renewal.running(&link), |ui| pill(ui, "Renew now", None, false)).inner.clicked() {
+                        app.start_palv_renewal(link, false);
+                    }
+                    ui.label(RichText::new(format!("Palv · {}", super::palv::expiry_label(&session))).color(theme::text_dim()));
+                    ui.label(RichText::new(status).color(theme::text_dim()));
+                } else {
+                    open_palv_button(ui);
+                    ui.label(RichText::new("Palv · Expiry unavailable. Renew in your browser.").color(theme::text_dim()));
                 }
             });
         }
@@ -1633,7 +1724,7 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
         app.hires_sources_changed();
     }
     if app.hires_adding {
-        let mask = crate::palv::Session::from_link(&app.hires_draft).is_some();
+        let mask = crate::palv::is_palv_link(&app.hires_draft);
         let resp = super::text_field(ui, "", &mut app.hires_draft, mask, "https://your-addon.example");
         if app.hires_focus {
             resp.request_focus();
@@ -1656,6 +1747,12 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
         app.hires_adding = true;
         app.hires_focus = true;
         app.hires_draft.clear();
+    }
+}
+
+fn open_palv_button(ui: &mut Ui) {
+    if pill(ui, "Renew now", None, false).on_hover_text("Open Palv in your browser").clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(crate::palv::DASHBOARD));
     }
 }
 

@@ -131,6 +131,9 @@ impl App {
                 }
                 if !self.persist_hires_sources() {
                     self.toast("Palv renewed, but BitChord couldn't save the new source URL");
+                } else {
+                    log::info!("Palv session renewed");
+                    self.toast("Palv renewed. Source URL updated.");
                 }
             }
             Err(Failure::Retry)
@@ -197,4 +200,14 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub(super) fn expiry_label(session: &Session) -> String {
+    let seconds = session.expires_at().saturating_sub(unix_now());
+    match seconds {
+        0 => "Session expired".to_owned(),
+        1..=59 => "Expires in under a minute".to_owned(),
+        60..=3599 => format!("Expires in {} min", seconds / 60),
+        _ => format!("Expires in {} h {} min", seconds / 3600, seconds / 60 % 60),
+    }
 }

@@ -37,6 +37,8 @@ pub(super) struct Processor {
     filters: [Option<Biquad>; BANDS.len()],
     delay: Vec<[[f32; 2]; BANDS.len()]>,
     gains: [f32; 2],
+    master_gain: f32,
+    peak_gain: f32,
     headroom: f32,
     equalized: bool,
 }
@@ -49,29 +51,52 @@ impl Processor {
             filters: [None; BANDS.len()],
             delay: vec![[[0.0; 2]; BANDS.len()]; channels as usize],
             gains: [1.0; 2],
+            master_gain: 1.0,
+            peak_gain: 1.0,
             headroom: 1.0,
             equalized: false,
         }
     }
 
-    pub(super) fn update(&mut self, settings: Settings) {
+    pub(super) fn update(&mut self, settings: Settings, master_gain: f32) {
         self.gains = if self.delay.len() > 1 {
             [settings.left, settings.right].map(|level| f32::from(level.min(100)) / 100.0)
         } else {
             [1.0; 2]
         };
         let bands = settings.bands.map(|db| db.clamp(-12, 12));
-        if bands == self.bands {
-            return;
+        if bands != self.bands {
+            for (i, &gain) in bands.iter().enumerate() {
+                if gain != self.bands[i] {
+                    self.filters[i] = Biquad::peak(BANDS[i].0, self.rate, gain);
+                    for channel in &mut self.delay {
+                        channel[i] = [0.0; 2];
+                    }
+                }
+            }
+            self.bands = bands;
+            self.equalized = self.filters.iter().any(Option::is_some);
+            self.peak_gain = if bands.iter().any(|&db| db > 0) { self.peak_gain() } else { 1.0 };
         }
-        self.bands = bands;
-        self.filters = std::array::from_fn(|i| Biquad::peak(BANDS[i].0, self.rate, bands[i]));
-        self.delay.fill([[0.0; 2]; BANDS.len()]);
-        self.equalized = self.filters.iter().any(Option::is_some);
-        self.headroom = if bands.iter().any(|&db| db > 0) { self.preamp() } else { 1.0 };
+        self.master_gain = master_gain;
+        let channel_gain = if self.delay.len() == 2 { self.gains[0].max(self.gains[1]) } else { 1.0 };
+        let ceiling = (0.97 / (self.peak_gain * channel_gain)).min(1.0);
+        // Keep the low end of the volume range unchanged. Above the knee, give
+        // the remaining slider travel a rising range that ends at the safe peak.
+        let knee = 0.80 * ceiling;
+        self.headroom = if self.peak_gain > 1.0 && ceiling < 1.0 && master_gain > knee {
+            let travel = (master_gain - knee) / (1.0 - knee);
+            (knee + travel * (ceiling - knee)) / master_gain
+        } else {
+            1.0
+        };
     }
 
-    fn preamp(&self) -> f32 {
+    pub(super) fn headroom_db(&self) -> f32 {
+        20.0 * self.headroom.log10()
+    }
+
+    fn peak_gain(&self) -> f32 {
         let nyquist = f64::from(self.rate) * 0.5;
         let peak = (0..=256)
             .map(|i| 10.0 * (nyquist / 10.0).powf(f64::from(i) / 256.0))
@@ -81,16 +106,15 @@ impl Processor {
                 self.filters.iter().flatten().map(|f| f.power(sin, cos)).product::<f64>()
             })
             .fold(1.0_f64, f64::max);
-        // Fixed headroom for overlapping boosts, with a margin between sampled frequencies.
-        (0.97 / peak.sqrt()) as f32
+        peak.sqrt() as f32
     }
 
     pub(super) fn sample(&mut self, channel: usize, sample: f32) -> f32 {
-        let gain = self.gains.get(channel).copied().unwrap_or(1.0);
+        let gain = self.gains.get(channel).copied().unwrap_or(1.0) * self.master_gain * self.headroom;
         if !self.equalized {
             return sample * gain;
         }
-        let mut output = sample * self.headroom;
+        let mut output = sample;
         for (filter, delay) in self.filters.iter().zip(&mut self.delay[channel]) {
             if let Some(f) = filter {
                 let next = f.b0 * output + delay[0];
@@ -156,12 +180,12 @@ mod tests {
     #[test]
     fn stereo_levels_are_independent_and_leave_other_channels_alone() {
         let mut output = Processor::new(6, 48_000);
-        output.update(Settings { left: 25, right: 0, ..Settings::default() });
+        output.update(Settings { left: 25, right: 0, ..Settings::default() }, 1.0);
         assert_eq!(output.sample(0, 0.8), 0.2);
         assert_eq!(output.sample(1, 0.8), 0.0);
         assert_eq!(output.sample(2, 0.8), 0.8);
         let mut mono = Processor::new(1, 48_000);
-        mono.update(Settings { left: 0, right: 0, ..Settings::default() });
+        mono.update(Settings { left: 0, right: 0, ..Settings::default() }, 1.0);
         assert_eq!(mono.sample(0, 0.8), 0.8);
     }
 
@@ -170,7 +194,7 @@ mod tests {
         let mut output = Processor::new(2, 48_000);
         let mut settings = Settings::default();
         settings.bands[8] = -12;
-        output.update(settings);
+        output.update(settings, 1.0);
         fn energy(output: &mut Processor, frequency: f32) -> f32 {
             (0..9_600)
                 .map(|i| {
@@ -191,7 +215,7 @@ mod tests {
         settings.bands[13] = 12;
         settings.bands[14] = 12;
         let mut output = Processor::new(2, 48_000);
-        output.update(settings);
+        output.update(settings, 1.0);
         let peak = (0..4_800)
             .map(|i| {
                 let angle = std::f32::consts::TAU * 10_390.0 * i as f32 / 48_000.0;
@@ -204,5 +228,24 @@ mod tests {
             .skip(2_400)
             .fold(0.0_f32, f32::max);
         assert!((0.8..=1.0).contains(&peak), "{peak}");
+    }
+
+    #[test]
+    fn a_boost_uses_available_volume_headroom_before_reducing_other_bands() {
+        let mut settings = Settings::default();
+        settings.bands[8] = 12;
+        let mut output = Processor::new(2, 96_000);
+        output.update(settings, 0.16);
+        assert_eq!(output.headroom_db(), 0.0);
+        let mut tail = 0.0;
+        for _ in 0..4_800 {
+            tail = output.sample(0, 0.75);
+        }
+        assert!((tail - 0.12).abs() < 0.001, "{tail}");
+        output.update(settings, 0.65);
+        let mid_gain = output.master_gain * output.headroom;
+        output.update(settings, 1.0);
+        assert!(output.headroom_db() < -11.0);
+        assert!(output.master_gain * output.headroom > mid_gain);
     }
 }
