@@ -77,13 +77,13 @@ pub(super) fn show(
         egui::ComboBox::from_id_salt("equalizer-band").selected_text(format!("Band {}", band + 1))
             .show_ui(ui, |ui| {
                 for (index, &hz) in settings.frequency_hz.iter().enumerate() {
-                    ui.selectable_value(&mut band, index, format!("{} ? {}", index + 1, hz_label(hz)));
+                    ui.selectable_value(&mut band, index, format!("{} · {}", index + 1, hz_label(hz)));
                 }
             });
         ui.label("Frequency");
         ui.add(egui::DragValue::new(&mut settings.frequency_hz[band]).range(FREQUENCY).speed(1.0).max_decimals(1).suffix(" Hz"));
         ui.label("Gain");
-        ui.add(egui::DragValue::new(&mut settings.bands[band]).range(GAIN).speed(0.1).fixed_decimals(1).suffix(" dB"));
+        ui.add(egui::DragValue::new(&mut settings.bands[band]).range(GAIN).speed(0.1).fixed_decimals(2).suffix(" dB"));
         ui.label("Q");
         ui.add(egui::DragValue::new(&mut settings.q[band]).range(Q).speed(0.02).fixed_decimals(2))
             .on_hover_text("Controls filter width. Higher Q affects a narrower range around the selected frequency.");
@@ -94,7 +94,7 @@ pub(super) fn show(
     if hz >= rate as f32 * 0.5 {
         ui.label(
             RichText::new(
-                "This frequency is above the mixer?s usable range at its current sample rate.",
+                "This frequency is above the usable range at the current mixer rate.",
             )
             .color(theme::text_dim()),
         );
@@ -115,7 +115,7 @@ pub(super) fn show(
     };
     ui.label(
         RichText::new(format!(
-            "{} {format} ? Auto headroom {headroom_db:.1} dB",
+            "{} {format} · Auto headroom {headroom_db:.1} dB",
             hz_label(rate as f32),
         ))
         .font(theme::regular(12.0))
@@ -253,7 +253,7 @@ fn band_graph(ui: &mut Ui, settings: &mut Settings, rate: u32, selected: &mut us
         }
         painter.circle_filled(center, if i == *selected { 4.8 } else { 3.7 }, node_color);
         node.on_hover_text(format!(
-            "{} ? {:+.1} dB ? Q {:.2}",
+            "{} · {:+.2} dB · Q {:.2}",
             hz_label(hz),
             settings.bands[i],
             settings.q[i]
