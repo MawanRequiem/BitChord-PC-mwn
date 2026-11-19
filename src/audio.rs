@@ -63,7 +63,8 @@ fn now_ms() -> u64 {
 
 #[derive(Default)]
 pub struct AudioStatus {
-    output_effects: std::sync::RwLock<effects::Settings>,
+    output_effects: std::sync::RwLock<effects::Prepared>,
+    output_format: std::sync::RwLock<Option<OutputFormat>>,
     eq_headroom_db: AtomicU32,
     pub position_ms: AtomicU64,
     /// When `position_ms` was sampled (ms since EPOCH), for smooth extrapolation.
@@ -561,9 +562,23 @@ pub struct AudioHandle {
     pub status: Arc<AudioStatus>,
 }
 
+#[derive(Clone, Copy)]
+pub struct OutputFormat {
+    pub mixer_rate: u32,
+    pub mixer_channels: u16,
+    pub device_rate: u32,
+    pub device_channels: u16,
+    pub device_sample_format: rodio::cpal::SampleFormat,
+}
+
 impl AudioHandle {
     pub fn set_output_effects(&self, settings: effects::Settings) {
-        *self.status.output_effects.write().unwrap() = settings;
+        let mut prepared = self.status.output_effects.write().unwrap();
+        *prepared = effects::Prepared::new(settings, prepared.rate);
+    }
+
+    pub fn output_format(&self) -> Option<OutputFormat> {
+        *self.status.output_format.read().unwrap()
     }
 
     pub fn eq_headroom_db(&self) -> f32 {
@@ -763,6 +778,7 @@ impl Output {
         // The old device's stream gives our mixer back when it's dropped.
         self.sink = None;
         self.device = None;
+        *status.output_format.write().unwrap() = None;
         self.checked = Instant::now();
         let Some(device) = target(self.preferred.as_deref()) else {
             return false;
@@ -800,6 +816,20 @@ impl Output {
         sink.log_on_drop(false);
         let channels = rodio::Source::channels(&source).get();
         let rate = rodio::Source::sample_rate(&source).get();
+        {
+            let mut settings = status.output_effects.write().unwrap();
+            if settings.rate != rate {
+                *settings = effects::Prepared::new(settings.settings, rate);
+            }
+        }
+        let config = sink.config();
+        *status.output_format.write().unwrap() = Some(OutputFormat {
+            mixer_rate: rate,
+            mixer_channels: channels,
+            device_rate: config.sample_rate().get(),
+            device_channels: config.channel_count().get(),
+            device_sample_format: config.sample_format(),
+        });
         sink.mixer().add(Bridge {
             inner: Some(source), slot: self.slot.clone(), channels, n: 0,
             status: status.clone(), effects: effects::Processor::new(channels, rate),

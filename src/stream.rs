@@ -116,6 +116,8 @@ pub struct Shared {
     pub format: Format,
     /// What the player can say about this stream, when its source reported it (addons).
     pub info: Option<crate::hires::Info>,
+    /// This stream came from the Downloads folder.
+    local_file: bool,
     /// Flips to true once the download task has stopped (complete, failed or cancelled).
     done: tokio::sync::watch::Sender<bool>,
     /// Wakes waiting workers: `limit` lifted, a reader moved or left, or cancelled.
@@ -149,6 +151,7 @@ impl Shared {
             tempo: Arc::new(std::sync::OnceLock::new()),
             format,
             info,
+            local_file: false,
             done: tokio::sync::watch::Sender::new(false),
             changed: tokio::sync::Notify::new(),
         })
@@ -157,7 +160,9 @@ impl Shared {
     /// A buffer that already holds the whole file (a downloaded song).
     pub fn from_bytes(data: Vec<u8>, duration_ms: u64, loudness_db: Option<f32>) -> Arc<Self> {
         // Saved songs are AAC (downloads take that stream).
-        Self::from_bytes_with_format(data, duration_ms, loudness_db, Format::Aac, None)
+        let mut shared = Self::from_bytes_with_format(data, duration_ms, loudness_db, Format::Aac, None);
+        Arc::get_mut(&mut shared).expect("new download buffer").local_file = true;
+        shared
     }
 
     /// A buffer that's already whole, in whatever container it was decoded to.
@@ -613,6 +618,9 @@ pub struct Stats {
     pub sample_rate: u32,
     pub channels: u16,
     pub bitrate_kbps: Option<u32>,
+    pub transport_bitrate_kbps: Option<u32>,
+    pub pcm_bitrate_kbps: Option<u32>,
+    pub local_file: bool,
 }
 
 impl Stats {
@@ -620,7 +628,9 @@ impl Stats {
     pub fn of(shared: &Shared, decoder: &TrackDecoder) -> Self {
         let rate = rodio::Source::sample_rate(decoder).get();
         let channels = rodio::Source::channels(decoder).get();
-        Self::from_parts(&shared.format, shared.info.as_ref(), shared.total, shared.duration_ms, rate, channels)
+        let mut stats = Self::from_parts(&shared.format, shared.info.as_ref(), shared.total, shared.duration_ms, rate, channels);
+        stats.local_file = shared.local_file;
+        stats
     }
 
     fn from_parts(format: &Format, info: Option<&crate::hires::Info>, size: u64, duration_ms: u64, sample_rate: u32, channels: u16) -> Self {
@@ -635,11 +645,16 @@ impl Stats {
         };
         let bit_depth = info.and_then(|i| i.bit_depth);
         let measured = (duration_ms > 0 && size != crate::hires::UNKNOWN_SIZE).then(|| (size * 8 / duration_ms) as u32);
-        let bitrate_kbps = match bit_depth {
+        // PCM bytes (such as an already decoded Atmos stream) do not measure transport.
+        let transport_bitrate_kbps = info.and_then(|i| i.bitrate_kbps)
+            .or_else(|| (!matches!(format, Format::Pcm { .. })).then_some(measured).flatten())
+            .filter(|&kbps| kbps > 0);
+        let pcm_bitrate_kbps = match bit_depth {
             Some(bits) if info.is_some_and(|i| i.lossless()) => Some(sample_rate * bits * channels as u32 / 1000),
-            _ => info.and_then(|i| i.bitrate_kbps).or(measured),
+            _ => None,
         };
-        Self { codec, bit_depth, sample_rate, channels, bitrate_kbps: bitrate_kbps.filter(|k| *k > 0) }
+        let bitrate_kbps = pcm_bitrate_kbps.or(transport_bitrate_kbps);
+        Self { codec, bit_depth, sample_rate, channels, bitrate_kbps, transport_bitrate_kbps, pcm_bitrate_kbps, local_file: false }
     }
 }
 

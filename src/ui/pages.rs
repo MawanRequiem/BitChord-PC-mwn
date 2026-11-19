@@ -1644,10 +1644,10 @@ fn settings_sources(app: &mut App, ui: &mut Ui) {
 fn output_effects(app: &mut App, ui: &mut Ui) {
     let settings = &mut app.output_effects;
     let before = *settings;
-    if settings_row_shown(ui, "Equalizer (16 bands)", "EQ bass midrange treble frequency gain presets headroom clipping protection") {
+    if settings_row_shown(ui, "Parametric equalizer (16 bands)", "EQ bass midrange treble frequency gain bandwidth Q preamp presets headroom clipping protection") {
         ui.add_space(12.0);
-        ui.label(RichText::new("Equalizer · 16 bands").font(theme::semibold(15.0)));
-        super::equalizer::show(ui, settings, app.audio.eq_headroom_db());
+        ui.label(RichText::new("Parametric EQ · 16 bands").font(theme::semibold(15.0)));
+        super::equalizer::show(ui, settings, app.audio.output_format().map(|format| format.mixer_rate), app.audio.eq_headroom_db());
         ui.add_space(7.0);
         divider(ui);
     }

@@ -142,6 +142,8 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
             app.set_fullscreen(ui.ctx(), false);
         }
     }
+    let details = widgets::pill(&mut hui, "Audio details", None, false);
+    egui::Popup::menu(&details).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| playback_details(app, ui));
     hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(super::titlebar::right_gap(ui.ctx(), ui.max_rect(), 0.0));
         // Its actions (like, download, share…) are for what's heard: a song version
@@ -1103,6 +1105,64 @@ fn audio_info_menu(ui: &mut Ui, info: &crate::hires::Info) {
     }
     if info.duration_ms > 0 {
         info_row(ui, "Duration", &super::fmt_time((info.duration_ms / 1000) as u32));
+    }
+    ui.add_space(6.0);
+}
+
+fn playback_details(app: &App, ui: &mut Ui) {
+    ui.set_width(360.0);
+    let output = app.audio.output_format();
+    let stats = app.stream_stats.as_ref().filter(|(generation, _)| *generation == app.generation && app.mix_hold().is_none()).map(|(_, stats)| stats);
+    menu_caption(ui, "SOURCE & DECODER");
+    if let Some(stats) = stats {
+        let source = app.audio_info.as_ref().filter(|(generation, _)| *generation == app.generation)
+            .map(|(_, info)| info.host.as_str())
+            .unwrap_or(if stats.local_file { "Downloads" } else { "YouTube Music" });
+        info_row(ui, "Source", source);
+        info_row(ui, "Codec", &stats.codec);
+        info_row(ui, "Decoded format", &format!("{} · {}", rate_text(stats.sample_rate), channels_text(stats.channels)));
+        if let Some(bits) = stats.bit_depth {
+            info_row(ui, "Reported bit depth", &format!("{bits}-bit"));
+        }
+        if let Some(kbps) = stats.transport_bitrate_kbps {
+            info_row(ui, "Stream bitrate", &format!("{} kbps", thousands(kbps)));
+        }
+        if let Some(kbps) = stats.pcm_bitrate_kbps {
+            info_row(ui, "PCM bitrate", &format!("{} kbps", thousands(kbps)));
+        }
+    } else {
+        info_row(ui, "Decoder", if app.mix_hold().is_some() { "Track transition" } else { "Waiting for stream format" });
+    }
+    menu_divider(ui);
+    menu_caption(ui, "PROCESSING");
+    if let Some(format) = output {
+        info_row(ui, "Mixer", &format!("{} · {}", rate_text(format.mixer_rate), channels_text(format.mixer_channels)));
+        let settings = app.output_effects;
+        let active = crate::audio::effects::Response::new(settings, format.mixer_rate).active_bands();
+        let eq = if settings.bypass { "Bypassed".into() } else if active == 0 { "Flat".into() } else { format!("{active} active bands") };
+        info_row(ui, "Parametric EQ", &eq);
+        if !settings.bypass && settings.preamp_db != 0.0 {
+            info_row(ui, "EQ preamp", &format!("{:.1} dB", settings.preamp_db));
+        }
+        if app.audio.eq_headroom_db() < -0.05 {
+            info_row(ui, "Auto headroom", &format!("{:.1} dB", app.audio.eq_headroom_db()));
+        }
+        info_row(ui, "Left / right gain", &format!("{}% / {}%", settings.left, settings.right));
+        if app.normalize {
+            info_row(ui, "Volume normalization", "Enabled");
+        }
+        let mut rates = stats.map(|s| vec![s.sample_rate]).unwrap_or_default();
+        rates.extend([format.mixer_rate, format.device_rate]);
+        rates.dedup();
+        if rates.len() > 1 {
+            info_row(ui, "Sample-rate conversion", &rates.into_iter().map(rate_text).collect::<Vec<_>>().join(" → "));
+        }
+        menu_divider(ui);
+        menu_caption(ui, "OUTPUT DEVICE");
+        info_row(ui, "Output stream", &format!("{} · {}", rate_text(format.device_rate), channels_text(format.device_channels)));
+        info_row(ui, "Sample format", &format!("{:?}", format.device_sample_format));
+    } else {
+        info_row(ui, "Output device", "Unavailable");
     }
     ui.add_space(6.0);
 }

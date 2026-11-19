@@ -1,7 +1,7 @@
 use egui::{Align2, Color32, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::{
-    audio::effects::{BANDS, Settings},
+    audio::effects::{BANDS, FREQUENCY, GAIN, PREAMP, Q, Response, Settings},
     theme,
 };
 
@@ -21,12 +21,25 @@ const PRESETS: [(&str, [i8; BANDS.len()]); 4] = [
     ),
 ];
 
-pub(super) fn show(ui: &mut Ui, settings: &mut Settings, headroom_db: f32) {
+pub(super) fn show(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    mixer_rate: Option<u32>,
+    headroom_db: f32,
+) {
     let selection = ui.make_persistent_id("selected-frequency");
     let mut band: usize = ui.data(|data| data.get_temp(selection)).unwrap_or(8);
+    let rate = mixer_rate.unwrap_or(48_000);
+    let defaults = Settings::default();
     let current = PRESETS
         .iter()
-        .find(|(_, gains)| gains == &settings.bands)
+        .find(|(_, gains)| {
+            gains.map(f32::from) == settings.bands
+                && settings.q == defaults.q
+                && settings.frequency_hz == defaults.frequency_hz
+                && settings.preamp_db == 0.0
+                && settings.enabled == defaults.enabled
+        })
         .map_or("Custom", |(title, _)| *title);
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("equalizer-preset")
@@ -34,78 +47,135 @@ pub(super) fn show(ui: &mut Ui, settings: &mut Settings, headroom_db: f32) {
             .show_ui(ui, |ui| {
                 for (label, gains) in PRESETS {
                     if ui.selectable_label(current == label, label).clicked() {
-                        settings.bands = gains;
+                        settings.bands = gains.map(f32::from);
+                        settings.frequency_hz = defaults.frequency_hz;
+                        settings.q = defaults.q;
+                        settings.enabled = defaults.enabled;
+                        settings.preamp_db = defaults.preamp_db;
                     }
                 }
             });
-        if super::widgets::pill(ui, "Reset EQ", None, false).clicked() {
-            settings.bands.fill(0);
+        let mut enabled = !settings.bypass;
+        if ui.checkbox(&mut enabled, "EQ enabled").changed() {
+            settings.bypass = !enabled;
         }
+        ui.label("Preamp");
+        ui.add(
+            egui::DragValue::new(&mut settings.preamp_db)
+                .range(PREAMP)
+                .speed(0.1)
+                .fixed_decimals(1)
+                .suffix(" dB"),
+        )
+        .on_hover_text("Apply a fixed gain reduction to the EQ output.");
     });
+
     ui.add_space(8.0);
-    band_graph(ui, &mut settings.bands, &mut band);
+    band_graph(ui, settings, rate, &mut band);
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
-        egui::ComboBox::from_id_salt("equalizer-band")
-            .selected_text(BANDS[band].1)
+        egui::ComboBox::from_id_salt("equalizer-band").selected_text(format!("Band {}", band + 1))
             .show_ui(ui, |ui| {
-                for (index, (_, label, _)) in BANDS.iter().enumerate() {
-                    ui.selectable_value(&mut band, index, *label);
+                for (index, &hz) in settings.frequency_hz.iter().enumerate() {
+                    ui.selectable_value(&mut band, index, format!("{} ? {}", index + 1, hz_label(hz)));
                 }
             });
-        let gain = &mut settings.bands[band];
-        ui.add(egui::Slider::new(gain, -12..=12).suffix(" dB"))
-            .on_hover_text("Adjust selected band");
+        ui.label("Frequency");
+        ui.add(egui::DragValue::new(&mut settings.frequency_hz[band]).range(FREQUENCY).speed(1.0).max_decimals(1).suffix(" Hz"));
+        ui.label("Gain");
+        ui.add(egui::DragValue::new(&mut settings.bands[band]).range(GAIN).speed(0.1).fixed_decimals(1).suffix(" dB"));
+        ui.label("Q");
+        ui.add(egui::DragValue::new(&mut settings.q[band]).range(Q).speed(0.02).fixed_decimals(2))
+            .on_hover_text("Controls filter width. Higher Q affects a narrower range around the selected frequency.");
+        ui.checkbox(&mut settings.enabled[band], "Band enabled");
     });
-    ui.label(
-        RichText::new(BANDS[band].2)
-            .font(theme::regular(12.5))
+
+    let hz = settings.frequency_hz[band];
+    if hz >= rate as f32 * 0.5 {
+        ui.label(
+            RichText::new(
+                "This frequency is above the mixer?s usable range at its current sample rate.",
+            )
             .color(theme::text_dim()),
+        );
+    } else if let Some((_, _, help)) = BANDS
+        .iter()
+        .min_by(|a, b| (a.0 / hz).ln().abs().total_cmp(&(b.0 / hz).ln().abs()))
+    {
+        ui.label(
+            RichText::new(*help)
+                .font(theme::regular(12.5))
+                .color(theme::text_dim()),
+        );
+    }
+    let format = if mixer_rate.is_some() {
+        "mixer"
+    } else {
+        "preview"
+    };
+    ui.label(
+        RichText::new(format!(
+            "{} {format} ? Auto headroom {headroom_db:.1} dB",
+            hz_label(rate as f32),
+        ))
+        .font(theme::regular(12.0))
+        .color(theme::text_dim()),
+    )
+    .on_hover_text(
+        "The graph includes your preamp. Automatic peak protection is reported separately.",
     );
-    ui.label(RichText::new(format!("Clipping protection · {headroom_db:.1} dB")).font(theme::regular(12.0)).color(theme::text_dim()))
-    .on_hover_text("Uses the volume headroom available for this EQ curve. Higher volume settings may need extra reduction to protect peaks.");
     ui.data_mut(|data| data.insert_temp(selection, band));
 }
 
-fn band_graph(ui: &mut Ui, gains: &mut [i8; BANDS.len()], selected: &mut usize) {
-    let (plot, _) = ui.allocate_exact_size(vec2(ui.available_width(), 186.0), Sense::hover());
-    let chart = Rect::from_min_max(plot.min + vec2(39.0, 17.0), plot.max - vec2(16.0, 23.0));
+fn hz_label(hz: f32) -> String {
+    if hz < 1_000.0 {
+        format!("{hz:.0} Hz")
+    } else {
+        format!("{} kHz", hz / 1000.0)
+    }
+}
+
+fn band_graph(ui: &mut Ui, settings: &mut Settings, rate: u32, selected: &mut usize) {
+    let (plot, _) = ui.allocate_exact_size(vec2(ui.available_width(), 190.0), Sense::hover());
+    let chart = Rect::from_min_max(plot.min + vec2(40.0, 17.0), plot.max - vec2(25.0, 23.0));
     if !chart.is_positive() {
         return;
     }
-    let gain_y =
-        |db: i8| egui::remap_clamp(f32::from(db), -12.0..=12.0, chart.bottom()..=chart.top());
+    let lower = f64::from(*FREQUENCY.start());
+    let upper = f64::from(*FREQUENCY.end()).min(f64::from(rate) * 0.5);
+    if upper <= lower {
+        return;
+    }
+    let response = Response::new(*settings, rate);
+    let mut samples: Vec<_> = (0..=400)
+        .map(|i| lower * (upper / lower).powf(f64::from(i) / 400.0))
+        .collect();
+    samples.extend(
+        settings
+            .frequency_hz
+            .iter()
+            .map(|&hz| f64::from(hz))
+            .filter(|hz| (lower..=upper).contains(hz)),
+    );
+    samples.sort_unstable_by(f64::total_cmp);
+    let samples: Vec<_> = samples
+        .into_iter()
+        .map(|hz| (hz, response.db_at(hz) as f32))
+        .collect();
+    let extent = samples.iter().map(|(_, db)| db.abs()).fold(12.0, f32::max);
+    let limit = (extent / 6.0).ceil() * 6.0;
+    let gain_y = |db| egui::remap_clamp(db, -limit..=limit, chart.bottom()..=chart.top());
+    let frequency_x = |hz: f64| {
+        egui::remap(
+            hz.ln() as f32,
+            lower.ln() as f32..=upper.ln() as f32,
+            chart.left()..=chart.right(),
+        )
+    };
     let accent = ui
         .ctx()
         .data(|d| d.get_temp::<Color32>(egui::Id::unique("accent")))
         .unwrap_or(theme::RED);
-    let low = BANDS[0].0.ln();
-    let high = BANDS[BANDS.len() - 1].0.ln();
-    let x = BANDS.map(|(hz, _, _)| egui::remap(hz.ln(), low..=high, chart.left()..=chart.right()));
-
-    for (i, (gain, &at)) in gains.iter_mut().zip(&x).enumerate() {
-        let width = (chart.width() / BANDS.len() as f32 * 0.78).max(4.0);
-        let area = Rect::from_center_size(
-            pos2(at, chart.center().y),
-            vec2(width, chart.height() + 18.0),
-        )
-        .intersect(plot);
-        let response = ui.interact(
-            area,
-            ui.make_persistent_id(("eq-band", i)),
-            Sense::click_and_drag(),
-        );
-        if response.clicked() || response.dragged() {
-            *selected = i;
-        }
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            *gain = egui::remap_clamp(pointer.y, chart.top()..=chart.bottom(), 12.0..=-12.0).round()
-                as i8;
-        }
-        response.on_hover_text(format!("{} · {gain:+} dB", BANDS[i].1));
-    }
 
     let painter = ui.painter();
     painter.rect(
@@ -115,17 +185,17 @@ fn band_graph(ui: &mut Ui, gains: &mut [i8; BANDS.len()], selected: &mut usize) 
         Stroke::new(1.0, theme::glass(0.13)),
         StrokeKind::Inside,
     );
-    for db in [-12, -6, 0, 6, 12] {
+    for db in [-limit, -limit / 2.0, 0.0, limit / 2.0, limit] {
         let y = gain_y(db);
         painter.hline(
             chart.x_range(),
             y,
-            Stroke::new(1.0, theme::glass(if db == 0 { 0.23 } else { 0.09 })),
+            Stroke::new(1.0, theme::glass(if db == 0.0 { 0.23 } else { 0.09 })),
         );
-        let label = if db == 0 {
+        let label = if db == 0.0 {
             "0 dB".into()
         } else {
-            format!("{db:+}")
+            format!("{db:+.0}")
         };
         painter.text(
             pos2(chart.left() - 8.0, y),
@@ -135,31 +205,58 @@ fn band_graph(ui: &mut Ui, gains: &mut [i8; BANDS.len()], selected: &mut usize) 
             theme::text_dim(),
         );
     }
-    for i in [0, 3, 6, 8, 11, 15] {
-        painter.text(
-            pos2(x[i], chart.bottom() + 9.0),
-            Align2::CENTER_TOP,
-            BANDS[i].1,
-            theme::regular(10.5),
-            theme::text_dim(),
-        );
-    }
-
-    let points: Vec<_> = x
-        .iter()
-        .zip(gains.iter())
-        .map(|(&x, &db)| pos2(x, gain_y(db)))
-        .collect();
-    painter.add(Shape::line(points.clone(), Stroke::new(2.0, accent)));
-    for (i, point) in points.into_iter().enumerate() {
-        painter.vline(
-            point.x,
-            gain_y(gains[i].max(0))..=gain_y(gains[i].min(0)),
-            Stroke::new(3.0, theme::with_alpha(accent, 0.30)),
-        );
-        if i == *selected {
-            painter.circle_stroke(point, 8.0, Stroke::new(1.5, accent));
+    for hz in [10.0, 25.0, 100.0, 400.0, 1_000.0, 4_000.0, 20_000.0] {
+        if hz <= upper {
+            painter.text(
+                pos2(frequency_x(hz), chart.bottom() + 9.0),
+                Align2::CENTER_TOP,
+                hz_label(hz as f32),
+                theme::regular(10.5),
+                theme::text_dim(),
+            );
         }
-        painter.circle_filled(point, if i == *selected { 4.8 } else { 3.7 }, accent);
+    }
+    let points = samples
+        .into_iter()
+        .map(|(hz, db)| pos2(frequency_x(hz), gain_y(db)))
+        .collect();
+    painter.add(Shape::line(points, Stroke::new(2.0, accent)));
+
+    for i in 0..BANDS.len() {
+        let hz = settings.frequency_hz[i];
+        if f64::from(hz) > upper || hz >= rate as f32 * 0.5 {
+            continue;
+        }
+        let center = pos2(frequency_x(f64::from(hz)), gain_y(settings.bands[i]));
+        let hit = Rect::from_center_size(center, vec2(24.0, 24.0));
+        let node = ui.interact(
+            hit,
+            ui.make_persistent_id(("eq-band", i)),
+            Sense::click_and_drag(),
+        );
+        if node.clicked() || node.dragged() {
+            *selected = i;
+        }
+        if node.dragged()
+            && let Some(pointer) = node.interact_pointer_pos()
+        {
+            let db = egui::remap_clamp(pointer.y, chart.top()..=chart.bottom(), limit..=-limit);
+            settings.bands[i] = (db.clamp(*GAIN.start(), *GAIN.end()) * 10.0).round() / 10.0;
+        }
+        let node_color = if settings.bypass || !settings.enabled[i] {
+            theme::text_faint()
+        } else {
+            accent
+        };
+        if i == *selected {
+            painter.circle_stroke(center, 8.0, Stroke::new(1.5, node_color));
+        }
+        painter.circle_filled(center, if i == *selected { 4.8 } else { 3.7 }, node_color);
+        node.on_hover_text(format!(
+            "{} ? {:+.1} dB ? Q {:.2}",
+            hz_label(hz),
+            settings.bands[i],
+            settings.q[i]
+        ));
     }
 }
