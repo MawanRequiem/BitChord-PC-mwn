@@ -9,6 +9,7 @@ mod collections;
 mod dev;
 mod dialogs;
 mod equalizer;
+mod eq_profiles;
 mod glyphs;
 mod integrations;
 mod jam;
@@ -382,6 +383,11 @@ pub struct App {
     /// connected), and the devices last listed there.
     output_device: Option<(String, String)>,
     output_effects: crate::audio::effects::Settings,
+    eq_unlinked_effects: Option<crate::audio::effects::Settings>,
+    eq_profiles: eq_profiles::EqProfileStore,
+    selected_eq_profile: Option<String>,
+    observed_output: Option<String>,
+    output_observed: bool,
     output_devices: Vec<crate::audio::OutputDevice>,
     radio_pending: bool,
     seek_drag: Option<f32>,
@@ -601,6 +607,35 @@ pub(super) struct MixFrom {
 }
 
 impl App {
+    fn sync_eq_output(&mut self) {
+        if let Some(output) = self.audio.active_output() {
+            let id = output.id.as_str();
+            let changed = !self.output_observed || self.observed_output.as_deref() != Some(id);
+            self.output_observed = true;
+            if changed {
+                if self.eq_profiles.for_output(id).is_some() && self.eq_unlinked_effects.is_none() {
+                    self.eq_unlinked_effects = Some(self.output_effects);
+                }
+                if let Some(settings) = eq_profiles::output_transition(&self.eq_profiles, self.observed_output.as_deref(), id, self.eq_unlinked_effects) {
+                    self.output_effects = settings;
+                    if let Some(profile) = self.eq_profiles.for_output(id) {
+                        self.selected_eq_profile = Some(profile.clone());
+                    } else if self.observed_output.is_some() {
+                        self.selected_eq_profile = None;
+                    }
+                    self.audio.set_output_effects(settings);
+                } else if self.eq_unlinked_effects.is_none() {
+                    // The legacy active EQ is the general curve until a profile link is used.
+                    self.eq_unlinked_effects = Some(self.output_effects);
+                }
+                self.observed_output = Some(id.to_owned());
+            }
+        } else {
+            self.output_observed = false;
+            self.observed_output = None;
+        }
+    }
+
     pub fn new(
         backend: Backend,
         audio: AudioHandle,
@@ -730,6 +765,11 @@ impl App {
             playing_as: None,
             output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
             output_effects: get("output_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).unwrap_or_default().sanitized(),
+            eq_unlinked_effects: get("eq_unlinked_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).map(crate::audio::effects::Settings::sanitized),
+            eq_profiles: get("eq_profiles").and_then(|s| serde_json::from_str::<eq_profiles::EqProfileStore>(&s).ok()).unwrap_or_default(),
+            selected_eq_profile: get("selected_eq_profile").filter(|id| !id.is_empty()),
+            observed_output: None,
+            output_observed: false,
             output_devices: Vec::new(),
             updater: None,
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
@@ -1223,6 +1263,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         dev_pace();
+        self.sync_eq_output();
         self.lyric_view.release_hidden(ctx.cumulative_pass_nr());
         let now = ctx.input(|i| i.time);
         self.sync_look();
@@ -1544,6 +1585,9 @@ impl eframe::App for App {
         storage.set_string("output_device", device.unwrap_or_default());
         storage.set_string("output_device_name", device_name.unwrap_or_default());
         storage.set_string("output_effects", serde_json::to_string(&self.output_effects).unwrap_or_default());
+        storage.set_string("eq_profiles", serde_json::to_string(&self.eq_profiles).unwrap_or_default());
+        storage.set_string("selected_eq_profile", self.selected_eq_profile.clone().unwrap_or_default());
+        storage.set_string("eq_unlinked_effects", self.eq_unlinked_effects.and_then(|s| serde_json::to_string(&s).ok()).unwrap_or_default());
         // eframe has just saved the window's geometry. Minimized or in the tray that's
         // 0×0 at -32000, which would reopen as a speck: keep the last real one instead.
         if self.window_hidden {

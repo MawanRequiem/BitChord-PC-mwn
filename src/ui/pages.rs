@@ -1642,11 +1642,14 @@ fn settings_sources(app: &mut App, ui: &mut Ui) {
 }
 
 fn output_effects(app: &mut App, ui: &mut Ui) {
+    let active_output = app.audio.active_output();
+    let profile_output = active_output.as_ref().map(|d| (d.id.as_str(), d.name.as_str()));
     let settings = &mut app.output_effects;
     let before = *settings;
-    if settings_row_shown(ui, "Parametric equalizer (16 bands)", "EQ bass midrange treble frequency gain bandwidth Q preamp presets headroom clipping protection") {
+    if settings_row_shown(ui, "Parametric equalizer (16 bands)", "EQ bass midrange treble frequency gain bandwidth Q preamp presets headroom clipping protection profiles saved custom named recall update rename delete") {
         ui.add_space(12.0);
         ui.label(RichText::new("Parametric EQ · 16 bands").font(theme::semibold(15.0)));
+        super::eq_profiles::controls(ui, &mut app.eq_profiles, settings, &mut app.eq_unlinked_effects, &mut app.selected_eq_profile, profile_output);
         super::equalizer::show(ui, settings, app.audio.output_format().map(|format| format.mixer_rate), app.audio.eq_headroom_db());
         ui.add_space(7.0);
         divider(ui);
@@ -1657,6 +1660,9 @@ fn output_effects(app: &mut App, ui: &mut Ui) {
         });
     }
     if *settings != before {
+        if profile_output.is_none_or(|(id, _)| app.eq_profiles.for_output(id).is_none()) {
+            app.eq_unlinked_effects = Some(*settings);
+        }
         app.audio.set_output_effects(*settings);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(35));
     }

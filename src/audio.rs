@@ -65,6 +65,7 @@ fn now_ms() -> u64 {
 pub struct AudioStatus {
     output_effects: std::sync::RwLock<effects::Prepared>,
     output_format: std::sync::RwLock<Option<OutputFormat>>,
+    active_output: std::sync::RwLock<Option<Arc<OutputDevice>>>,
     eq_headroom_db: AtomicU32,
     pub position_ms: AtomicU64,
     /// When `position_ms` was sampled (ms since EPOCH), for smooth extrapolation.
@@ -101,6 +102,15 @@ pub struct AudioStatus {
 }
 
 impl AudioStatus {
+    fn publish_output(&self, device: Option<OutputDevice>, wake: &impl Fn()) {
+        let mut active = self.active_output.write().unwrap();
+        if active.as_deref() != device.as_ref() {
+            *active = device.map(Arc::new);
+            drop(active);
+            wake();
+        }
+    }
+
     pub fn position(&self) -> Duration {
         Duration::from_millis(self.position_ms.load(Ordering::Relaxed))
     }
@@ -581,6 +591,11 @@ impl AudioHandle {
         *self.status.output_format.read().unwrap()
     }
 
+    /// The endpoint the audio thread actually opened, including system-default fallbacks.
+    pub fn active_output(&self) -> Option<Arc<OutputDevice>> {
+        self.status.active_output.read().unwrap().clone()
+    }
+
     pub fn eq_headroom_db(&self) -> f32 {
         f32::from_bits(self.status.eq_headroom_db.load(Ordering::Relaxed))
     }
@@ -761,7 +776,7 @@ struct Output {
 }
 
 impl Output {
-    fn new(tx: Sender<AudioCmd>, status: &Arc<AudioStatus>, preferred: Option<String>) -> Self {
+    fn new(tx: Sender<AudioCmd>, status: &Arc<AudioStatus>, preferred: Option<String>, wake: &impl Fn()) -> Self {
         // Mix at the device's own format, so the usual case needs no conversion.
         let config = target(preferred.as_deref()).and_then(|d| d.default_output_config().ok());
         let channels = config.as_ref().and_then(|c| std::num::NonZero::new(c.channels())).unwrap_or(std::num::NonZero::new(2).unwrap());
@@ -769,21 +784,24 @@ impl Output {
         let (mixer, source) = rodio::mixer::mixer(channels, rate);
         let lost = Arc::new(AtomicBool::new(false));
         let mut out = Self { mixer, slot: Arc::new(std::sync::Mutex::new(Some(source))), sink: None, device: None, preferred, lost, checked: Instant::now() };
-        out.open(tx, status);
+        out.open(tx, status, wake);
         out
     }
 
-    /// Opens the picked device, or the default one. False if there's none to open.
-    fn open(&mut self, tx: Sender<AudioCmd>, status: &Arc<AudioStatus>) -> bool {
+    /// Publish the result after opening, so reopening the same endpoint never reports a transient disconnect.
+    fn open(&mut self, tx: Sender<AudioCmd>, status: &Arc<AudioStatus>, wake: &impl Fn()) {
+        let device = self.open_device(tx, status);
+        status.publish_output(device, wake);
+    }
+
+    fn open_device(&mut self, tx: Sender<AudioCmd>, status: &Arc<AudioStatus>) -> Option<OutputDevice> {
         // The old device's stream gives our mixer back when it's dropped.
         self.sink = None;
         self.device = None;
         *status.output_format.write().unwrap() = None;
         self.checked = Instant::now();
-        let Some(device) = target(self.preferred.as_deref()) else {
-            return false;
-        };
-        let id = device.id().map(|i| i.to_string()).ok();
+        let device = target(self.preferred.as_deref())?;
+        let endpoint = OutputDevice::from_device(&device);
         let lost = self.lost.clone();
         lost.store(false, Ordering::Relaxed);
         let on_error = move |e: rodio::cpal::StreamError| {
@@ -796,7 +814,7 @@ impl Output {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("audio: couldn't open the output device: {e}");
-                return false;
+                return None;
             }
         };
         // A stream that failed on its own hands the mixer back as its thread exits,
@@ -808,7 +826,7 @@ impl Output {
             }
             if waited.elapsed() > Duration::from_secs(1) {
                 log::warn!("audio: mixer still held by the old device");
-                return false;
+                return None;
             }
             std::thread::sleep(Duration::from_millis(5));
         };
@@ -842,10 +860,10 @@ impl Output {
             rodio::cpal::BufferSize::Default => 0,
         };
         status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
-        log::info!("audio: output device {:?} at {} Hz", id, rate);
+        self.device = endpoint.as_ref().map(|d| d.id.clone());
+        log::info!("audio: output device {:?} at {} Hz", self.device, rate);
         self.sink = Some(sink);
-        self.device = id;
-        true
+        endpoint
     }
 
     /// Whether the device to play through (the picked one if it's connected, else the
@@ -876,18 +894,20 @@ pub struct OutputDevice {
     pub name: String,
 }
 
+impl OutputDevice {
+    fn from_device(device: &rodio::cpal::Device) -> Option<Self> {
+        let id = device.id().ok()?.to_string();
+        let name = device.description().ok().map(|description| {
+            description.extended().first().cloned().unwrap_or_else(|| description.name().to_owned())
+        }).unwrap_or_else(|| id.clone());
+        Some(Self { id, name })
+    }
+}
+
 /// The connected output devices, by the names Windows' sound settings show.
 pub fn output_devices() -> Vec<OutputDevice> {
     let Ok(all) = rodio::cpal::default_host().output_devices() else { return Vec::new() };
-    let mut out: Vec<OutputDevice> = all
-        .filter_map(|d| {
-            let id = d.id().ok()?.to_string();
-            let desc = d.description().ok()?;
-            // "Speakers (Realtek(R) Audio)" rather than just "Speakers".
-            let name = desc.extended().first().cloned().unwrap_or_else(|| desc.name().to_owned());
-            Some(OutputDevice { id, name })
-        })
-        .collect();
+    let mut out: Vec<OutputDevice> = all.filter_map(|d| OutputDevice::from_device(&d)).collect();
     out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
@@ -977,7 +997,7 @@ fn run(
     events: Sender<AudioEvent>,
     wake: impl Fn(),
 ) {
-    let mut output = Output::new(tx.clone(), &status, device);
+    let mut output = Output::new(tx.clone(), &status, device, &wake);
     if output.sink.is_none() {
         let _ = events.send(AudioEvent::Error("No audio output device".into()));
         wake();
@@ -1019,7 +1039,7 @@ fn run(
                 }
                 log::debug!("audio: start generation {generation}");
                 if output.sink.is_none() || output.default_changed() {
-                    output.open(tx.clone(), &status);
+                    output.open(tx.clone(), &status, &wake);
                 }
                 player.clear();
                 let gain = norm_gain(&status, Some(&s));
@@ -1097,7 +1117,7 @@ fn run(
                 log::debug!("audio: upgrade generation {generation} to hi-res stream at {at:?}");
                 seek_seq += 1;
                 if output.sink.is_none() || output.default_changed() {
-                    output.open(tx.clone(), &status);
+                    output.open(tx.clone(), &status, &wake);
                 }
                 let paused = player.is_paused();
                 if !paused && !player.empty() {
@@ -1144,7 +1164,7 @@ fn run(
                 if current != 0 {
                     // Headphones may have come back (or gone) while paused.
                     if output.sink.is_none() || output.default_changed() {
-                        output.open(tx.clone(), &status);
+                        output.open(tx.clone(), &status, &wake);
                     }
                     player.play();
                     fading.iter().for_each(|f| f.player.play());
@@ -1254,7 +1274,7 @@ fn run(
             }
             Ok(AudioCmd::DeviceLost) => {
                 let was = output.device.clone();
-                output.open(tx.clone(), &status);
+                output.open(tx.clone(), &status, &wake);
                 // The device itself went away, not a hiccup on the same one: pause, as
                 // unplugging headphones does, rather than carry on out of the speakers.
                 if output.device != was && !player.is_paused() && (current != 0 || !fading.is_empty()) {
@@ -1269,7 +1289,7 @@ fn run(
                 log::info!("audio: output device set to {id:?}");
                 output.preferred = id;
                 if output.default_changed() || output.sink.is_none() {
-                    output.open(tx.clone(), &status);
+                    output.open(tx.clone(), &status, &wake);
                 }
             }
             Ok(AudioCmd::NormalizeVolume) => {
@@ -1298,7 +1318,7 @@ fn run(
             && !output.lost.load(Ordering::Relaxed)
             && (output.sink.is_none() || output.default_changed())
         {
-            output.open(tx.clone(), &status);
+            output.open(tx.clone(), &status, &wake);
         }
         if !fading.is_empty() {
             if let Some(f) = fading.iter().find(|f| f.natural) {
@@ -1363,6 +1383,25 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_output_follows_endpoint_ids_even_when_names_match() {
+        let (tx, _rx) = unbounded();
+        let audio = AudioHandle { tx, status: Arc::new(AudioStatus::default()) };
+        let wakes = std::cell::Cell::new(0);
+        let wake = || wakes.set(wakes.get() + 1);
+        let speakers = |id: &str| OutputDevice { id: id.to_owned(), name: "Speakers".to_owned() };
+
+        assert!(audio.active_output().is_none());
+        audio.status.publish_output(Some(speakers("usb-a")), &wake);
+        assert_eq!(audio.active_output().unwrap().id, "usb-a");
+        audio.status.publish_output(Some(speakers("usb-a")), &wake);
+        audio.status.publish_output(Some(speakers("usb-b")), &wake);
+        assert_eq!(audio.active_output().unwrap().id, "usb-b");
+        audio.status.publish_output(None, &wake);
+        assert!(audio.active_output().is_none());
+        assert_eq!(wakes.get(), 3);
+    }
 
     #[test]
     fn outgoing_clock_survives_incoming_position_reset() {
