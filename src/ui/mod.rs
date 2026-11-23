@@ -16,6 +16,7 @@ mod jam;
 mod karaoke;
 mod keys;
 mod lists;
+mod local_history;
 mod lyric_prefs;
 mod mini;
 mod notes;
@@ -339,6 +340,7 @@ pub struct App {
     artist: Option<ArtistPage>,
     library: Option<Library>,
     local_playlists: Vec<crate::local_playlists::Playlist>,
+    local_history: local_history::History,
     takeout_import: Option<Receiver<anyhow::Result<crate::local_playlists::takeout::Import>>>,
     /// When the library was last requested; the sidebar spinner gives up after a while.
     library_requested: std::time::Instant,
@@ -733,6 +735,7 @@ impl App {
             lists: Lists::default(),
             artist: None,
             local_playlists,
+            local_history: get("local_listening_history").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             takeout_import: None,
             library: None,
             library_requested: std::time::Instant::now(),
@@ -764,9 +767,23 @@ impl App {
             play_songs: get("play_songs").is_none_or(|v| v == "1"),
             playing_as: None,
             output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
-            output_effects: get("output_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).unwrap_or_default().sanitized(),
-            eq_unlinked_effects: get("eq_unlinked_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).map(crate::audio::effects::Settings::sanitized),
-            eq_profiles: get("eq_profiles").and_then(|s| serde_json::from_str::<eq_profiles::EqProfileStore>(&s).ok()).unwrap_or_default(),
+            output_effects: {
+                let mut effects = get("output_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).unwrap_or_default().sanitized();
+                if get("headroom_default_migrated").is_none() { effects.auto_headroom = true; }
+                effects
+            },
+            eq_unlinked_effects: get("eq_unlinked_effects").and_then(|s| serde_json::from_str::<crate::audio::effects::Settings>(&s).ok()).map(|effects| {
+                let mut effects = effects.sanitized();
+                if get("headroom_default_migrated").is_none() { effects.auto_headroom = true; }
+                effects
+            }),
+            eq_profiles: {
+                let mut profiles = get("eq_profiles").and_then(|s| serde_json::from_str::<eq_profiles::EqProfileStore>(&s).ok()).unwrap_or_default();
+                if get("headroom_default_migrated").is_none() {
+                    for profile in &mut profiles.profiles { profile.settings.auto_headroom = true; }
+                }
+                profiles
+            },
             selected_eq_profile: get("selected_eq_profile").filter(|id| !id.is_empty()),
             observed_output: None,
             output_observed: false,
@@ -1266,6 +1283,10 @@ impl eframe::App for App {
         self.sync_eq_output();
         self.lyric_view.release_hidden(ctx.cumulative_pass_nr());
         let now = ctx.input(|i| i.time);
+        if let Some(track) = self.current().cloned() {
+            let playing = self.playing() && self.audio.status.playing_gen.load(std::sync::atomic::Ordering::Relaxed) == self.generation;
+            self.local_history.observe(self.generation, &track, playing, now);
+        }
         self.sync_look();
         self.pump(now);
         self.tick_palv_renewal(ctx);
@@ -1552,6 +1573,8 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("local_listening_history", serde_json::to_string(&self.local_history).unwrap_or_default());
+        storage.set_string("headroom_default_migrated", "1".to_owned());
         if std::env::var_os("YTM_MUTE").is_none() {
             storage.set_string("volume", self.audio.volume().to_string());
         }

@@ -387,6 +387,57 @@ fn selection_bar(app: &mut App, ctx: &egui::Context, page: &Page, area: Rect) {
 
 fn home(app: &mut App, ui: &mut Ui, now: f64) {
     page_title(ui, "Home");
+    ui.add_space(10.0);
+    ui.label(RichText::new("Your listening on this device").font(theme::semibold(18.0)));
+    ui.horizontal_wrapped(|ui| {
+        let mut tracking = !app.local_history.paused;
+        if ui.checkbox(&mut tracking, "Save listening history locally").changed() {
+            app.local_history.paused = !tracking;
+        }
+        if !app.local_history.entries.is_empty() {
+            let clear_id = ui.make_persistent_id("clear-local-listening-history");
+            let confirming = ui.data(|d| d.get_temp::<bool>(clear_id)).unwrap_or(false);
+            if !confirming && ui.button("Clear history").clicked() {
+                ui.data_mut(|d| d.insert_temp(clear_id, true));
+            }
+            if confirming {
+                if ui.button("Confirm clear").clicked() {
+                    app.local_history.entries.clear();
+                    ui.data_mut(|d| d.remove::<bool>(clear_id));
+                }
+                if ui.button("Cancel").clicked() {
+                    ui.data_mut(|d| d.remove::<bool>(clear_id));
+                }
+            }
+        }
+    });
+    if app.local_history.entries.is_empty() {
+        ui.label(RichText::new("Songs appear here after 30 seconds of listening.").color(theme::text_dim()));
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            if pill(ui, "Play On repeat", Some(icon::PLAY), false).clicked() {
+                app.actions.push(Action::Play(app.local_history.on_repeat(), 0));
+            }
+            if pill(ui, "Play Rediscover", Some(icon::PLAY), false).clicked() {
+                app.actions.push(Action::Play(app.local_history.rediscover(), 0));
+            }
+            if pill(ui, "Radio from your top song", Some(icon::RADIO), false)
+                .on_hover_text("Uses YouTube Music to find similar songs.")
+                .clicked()
+                && let Some(track) = app.local_history.on_repeat().into_iter().next()
+            {
+                app.actions.push(Action::Radio(track));
+            }
+        });
+        let count = app.local_history.entries.len();
+        ui.label(RichText::new(format!("{count} song{} heard · On repeat ranks plays · Rediscover starts with older listens", if count == 1 { "" } else { "s" })).font(theme::regular(12.0)).color(theme::text_dim()));
+        for entry in app.local_history.entries.iter().take(3) {
+            let artist = entry.track.artist_line();
+            let label = if artist.is_empty() { entry.track.title.clone() } else { format!("{} · {artist}", entry.track.title) };
+            ui.label(RichText::new(label).color(theme::text_dim()));
+        }
+    }
+    ui.add_space(14.0);
     // A refresh keeps showing the current feed; the skeleton is only for an empty one.
     if app.home.as_ref().is_none_or(|h| app.home_loading && h.shelves.is_empty()) {
         placeholder(app, ui, now, 3, CARD);

@@ -108,7 +108,7 @@ impl Default for Settings {
             q: [1.8; BANDS.len()],
             enabled: [true; BANDS.len()],
             preamp_db: 0.0,
-            auto_headroom: false,
+            auto_headroom: true,
             bypass: false,
             left: 100,
             right: 100,
@@ -579,8 +579,16 @@ mod tests {
     }
 
     #[test]
-    fn bass_boost_leaves_treble_level_unchanged_by_default() {
+    fn automatic_headroom_is_enabled_by_default() {
+        assert!(Settings::default().auto_headroom);
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.auto_headroom);
+    }
+
+    #[test]
+    fn bass_boost_leaves_treble_level_unchanged_without_automatic_headroom() {
         let mut settings = Settings::default();
+        settings.auto_headroom = false;
         settings.bands[3] = 9.0;
         let mut output = Processor::new(1, 48_000);
         output.update(Prepared::new(settings, 48_000), 1.0);
@@ -602,6 +610,7 @@ mod tests {
     #[test]
     fn automatic_headroom_can_be_enabled_and_disabled_without_changing_filters() {
         let mut settings = Settings::default();
+        settings.auto_headroom = false;
         settings.bands[3] = 9.0;
         let mut output = Processor::new(2, 48_000);
         output.update(Prepared::new(settings, 48_000), 1.0);
