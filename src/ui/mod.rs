@@ -828,7 +828,7 @@ impl App {
             hires_sources,
             hires_sources_dirty,
             hires_sources_save_failed: false,
-            palv_renewal: palv::Renewal::new(get("auto_renew_palv").is_some_and(|v| v == "1")),
+            palv_renewal: palv::Renewal::new(palv::auto_renew_enabled(get("auto_renew_palv").as_deref())),
             hires_adding: false,
             hires_draft: String::new(),
             hires_focus: false,

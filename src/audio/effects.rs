@@ -94,6 +94,7 @@ pub struct Settings {
     pub q: [f32; BANDS.len()],
     pub enabled: [bool; BANDS.len()],
     pub preamp_db: f32,
+    pub auto_headroom: bool,
     pub bypass: bool,
     pub left: u8,
     pub right: u8,
@@ -107,6 +108,7 @@ impl Default for Settings {
             q: [1.8; BANDS.len()],
             enabled: [true; BANDS.len()],
             preamp_db: 0.0,
+            auto_headroom: false,
             bypass: false,
             left: 100,
             right: 100,
@@ -276,11 +278,11 @@ impl Bank {
         self.preamp_gain = 10.0_f64.powf(self.response.preamp_db / 20.0);
     }
 
-    fn update_gain(&mut self, master: f64, channel_max: f64) -> f64 {
+    fn update_gain(&mut self, master: f64, channel_max: f64, auto_headroom: bool) -> f64 {
         let ceiling = (0.97 / (self.peak_gain * self.preamp_gain * channel_max)).min(1.0);
         let knee = 0.80 * ceiling;
         // Preserve low listening levels and keep the remaining volume travel monotonic.
-        let headroom = if self.peak_gain > 1.0 && ceiling < 1.0 && master > knee {
+        let headroom = if auto_headroom && self.peak_gain > 1.0 && ceiling < 1.0 && master > knee {
             let travel = (master - knee) / (1.0 - knee);
             (knee + travel * (ceiling - knee)) / master
         } else {
@@ -357,9 +359,9 @@ impl Processor {
         } else {
             1.0
         };
-        self.headroom_db = (20.0 * self.active.update_gain(master, channel_max).log10()) as f32;
+        self.headroom_db = (20.0 * self.active.update_gain(master, channel_max, prepared.settings.auto_headroom).log10()) as f32;
         if self.fade_remaining != 0 {
-            self.previous.update_gain(master, channel_max);
+            self.previous.update_gain(master, channel_max, prepared.settings.auto_headroom);
         }
     }
 
@@ -577,8 +579,45 @@ mod tests {
     }
 
     #[test]
+    fn bass_boost_leaves_treble_level_unchanged_by_default() {
+        let mut settings = Settings::default();
+        settings.bands[3] = 9.0;
+        let mut output = Processor::new(1, 48_000);
+        output.update(Prepared::new(settings, 48_000), 1.0);
+        assert_eq!(output.headroom_db(), 0.0);
+        let mut input_energy = 0.0_f64;
+        let mut output_energy = 0.0_f64;
+        for i in 0..24_000 {
+            let sample = (std::f32::consts::TAU * 4_000.0 * i as f32 / 48_000.0).sin() * 0.1;
+            let processed = output.sample(0, sample);
+            if i >= 12_000 {
+                input_energy += f64::from(sample).powi(2);
+                output_energy += f64::from(processed).powi(2);
+            }
+        }
+        let db = 10.0 * (output_energy / input_energy).log10();
+        assert!(db.abs() < 0.05, "treble changed by {db} dB");
+    }
+
+    #[test]
+    fn automatic_headroom_can_be_enabled_and_disabled_without_changing_filters() {
+        let mut settings = Settings::default();
+        settings.bands[3] = 9.0;
+        let mut output = Processor::new(2, 48_000);
+        output.update(Prepared::new(settings, 48_000), 1.0);
+        assert_eq!(output.headroom_db(), 0.0);
+        settings.auto_headroom = true;
+        output.update(Prepared::new(settings, 48_000), 1.0);
+        assert!(output.headroom_db() < -1.0);
+        settings.auto_headroom = false;
+        output.update(Prepared::new(settings, 48_000), 1.0);
+        assert_eq!(output.headroom_db(), 0.0);
+    }
+
+    #[test]
     fn overlapping_boosts_get_fixed_headroom() {
         let mut settings = Settings::default();
+        settings.auto_headroom = true;
         settings.bands[13] = 12.0;
         settings.bands[14] = 12.0;
         let mut output = Processor::new(2, 48_000);
@@ -600,6 +639,7 @@ mod tests {
     #[test]
     fn a_boost_uses_available_volume_headroom_before_reducing_other_bands() {
         let mut settings = Settings::default();
+        settings.auto_headroom = true;
         settings.bands[8] = 12.0;
         let mut output = Processor::new(2, 96_000);
         output.update(Prepared::new(settings, 96_000), 0.16);

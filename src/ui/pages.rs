@@ -1613,13 +1613,16 @@ fn settings_sources(app: &mut App, ui: &mut Ui) {
                 ui.label(RichText::new("Add your personalized Palv URL to enable automatic renewal.").color(theme::text_dim()));
             });
         }
-        setting_row(ui, "Auto-renew Palv", Some("Checks the saved session while BitChord is running and renews near expiry."), |ui| {
-            ui.add_enabled_ui(supported, |ui| {
-                if toggle(ui, &mut app.palv_renewal.enabled, "Auto-renew Palv").changed() {
-                    app.palv_renewal.restart_scan();
-                    ui.ctx().request_repaint();
-                }
-            });
+        let renew_description = if supported {
+            "Checks the saved session while BitChord is running and renews near expiry."
+        } else {
+            "Waiting for a compatible Palv session URL."
+        };
+        setting_row(ui, "Auto-renew Palv", Some(renew_description), |ui| {
+            if toggle(ui, &mut app.palv_renewal.enabled, "Auto-renew Palv").changed() {
+                app.palv_renewal.restart_scan();
+                ui.ctx().request_repaint();
+            }
         });
         if search_of(ui).all || settings_hit("hi-res source add-on addons palv renew now renewal auto-renew", &search_of(ui).words) {
             hires_sources_editor(app, ui);
@@ -1709,13 +1712,13 @@ fn hires_sources_editor(app: &mut App, ui: &mut Ui) {
                     if browser {
                         open_palv_button(ui);
                     } else if ui.add_enabled_ui(!app.palv_renewal.running(&link), |ui| pill(ui, "Renew now", None, false)).inner.clicked() {
-                        app.start_palv_renewal(link, false);
+                        app.start_palv_renewal(link);
                     }
                     ui.label(RichText::new(format!("Palv · {}", super::palv::expiry_label(&session))).color(theme::text_dim()));
                     ui.label(RichText::new(status).color(theme::text_dim()));
                 } else {
                     open_palv_button(ui);
-                    ui.label(RichText::new("Palv · Expiry unavailable. Renew in your browser.").color(theme::text_dim()));
+                    ui.label(RichText::new("Palv · Automatic renewal is unavailable for this URL. Renew in your browser.").color(theme::text_dim()));
                 }
             });
         }

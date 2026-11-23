@@ -68,6 +68,8 @@ pub(super) fn show(
                 .suffix(" dB"),
         )
         .on_hover_text("Apply a fixed gain reduction to the EQ output.");
+        ui.checkbox(&mut settings.auto_headroom, "Automatic headroom")
+            .on_hover_text("Reduce the overall level when boosts need more headroom. Turn off to keep other frequencies at their set levels. Boosts can clip when this is off.");
     });
 
     ui.add_space(8.0);
@@ -113,6 +115,9 @@ pub(super) fn show(
     } else {
         "preview"
     };
+    if !settings.auto_headroom && !settings.bypass && settings.bands.iter().enumerate().any(|(i, gain)| settings.enabled[i] && *gain > 0.0) {
+        ui.label(RichText::new("Boosts can clip. Lower the preamp or enable automatic headroom.").font(theme::regular(12.0)).color(theme::text_dim()));
+    }
     ui.label(
         RichText::new(format!(
             "{} {format} · Auto headroom {headroom_db:.1} dB",

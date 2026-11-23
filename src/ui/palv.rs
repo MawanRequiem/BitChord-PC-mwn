@@ -19,7 +19,7 @@ pub(super) struct Renewal {
 }
 
 enum Attempt {
-    Running { retry: bool },
+    Running,
     RetryAt(Instant),
     Paused(&'static str),
 }
@@ -37,11 +37,21 @@ impl Renewal {
         self.next_scan = None;
     }
 
+    fn failed(&mut self, link: &str, failure: Failure, now: Instant) {
+        let next = match failure {
+            Failure::Retry if self.enabled => Attempt::RetryAt(now + RETRY_DELAY),
+            Failure::Retry => Attempt::Paused("Palv could not be reached for renewal."),
+            Failure::Browser => Attempt::Paused("Palv declined automatic renewal. Renew in your browser."),
+            Failure::RateLimited => Attempt::Paused("Palv rate-limited renewal. Try again later in your browser."),
+        };
+        self.attempts.insert(link.to_owned(), next);
+    }
+
     pub(super) fn status(&self, link: &str, session: &Session) -> (&'static str, bool) {
         match self.attempts.get(link) {
-            Some(Attempt::Running { .. }) => ("Renewing Palv…", false),
+            Some(Attempt::Running) => ("Renewing Palv…", false),
             Some(Attempt::RetryAt(_)) if self.enabled => (
-                "Palv is temporarily unavailable. BitChord will retry once.",
+                "Palv is temporarily unavailable. BitChord will retry automatically.",
                 false,
             ),
             Some(Attempt::Paused(reason)) => (reason, true),
@@ -52,7 +62,7 @@ impl Renewal {
     }
 
     pub(super) fn running(&self, link: &str) -> bool {
-        matches!(self.attempts.get(link), Some(Attempt::Running { .. }))
+        matches!(self.attempts.get(link), Some(Attempt::Running))
     }
 }
 
@@ -75,31 +85,31 @@ impl App {
             .filter_map(|source| {
                 let session = Session::from_link(source)?;
                 let link = session.manifest_link();
-                let retry = match self.palv_renewal.attempts.get(&link) {
-                    Some(Attempt::RetryAt(at)) if *at <= now => true,
-                    None if session.renew_in(unix_now).is_zero() => false,
+                match self.palv_renewal.attempts.get(&link) {
+                    Some(Attempt::RetryAt(at)) if *at <= now => {},
+                    None if session.renew_in(unix_now).is_zero() => {},
                     _ => return None,
-                };
-                Some((link, retry))
+                }
+                Some(link)
             })
             .collect();
-        for (link, retry) in due {
-            self.start_palv_renewal(link, retry);
+        for link in due {
+            self.start_palv_renewal(link);
         }
     }
 
-    pub(super) fn start_palv_renewal(&mut self, link: String, retry: bool) {
+    pub(super) fn start_palv_renewal(&mut self, link: String) {
         if self.palv_renewal.running(&link) {
             return;
         }
         self.palv_renewal
             .attempts
-            .insert(link.clone(), Attempt::Running { retry });
+            .insert(link.clone(), Attempt::Running);
         self.backend.request(Req::RenewPalv(link));
     }
 
     pub(super) fn finish_palv_renewal(&mut self, link: String, result: Result<String, Failure>) {
-        let attempt = self.palv_renewal.attempts.remove(&link);
+        self.palv_renewal.attempts.remove(&link);
         let matches_old = |source: &str| matches_link(source, &link);
         if !self.hires_sources.iter().any(|source| matches_old(source)) {
             return;
@@ -136,25 +146,9 @@ impl App {
                     self.toast("Palv renewed. Source URL updated.");
                 }
             }
-            Err(Failure::Retry)
-                if self.palv_renewal.enabled
-                    && matches!(attempt, Some(Attempt::Running { retry: false })) =>
-            {
-                self.palv_renewal
-                    .attempts
-                    .insert(link, Attempt::RetryAt(Instant::now() + RETRY_DELAY));
-            }
             Err(failure) => {
-                let reason = match failure {
-                    Failure::Retry => "Palv could not be reached for renewal.",
-                    Failure::Browser => "Palv declined automatic renewal. Renew in your browser.",
-                    Failure::RateLimited => {
-                        "Palv rate-limited renewal. Try again later in your browser."
-                    }
-                };
                 self.palv_renewal
-                    .attempts
-                    .insert(link, Attempt::Paused(reason));
+                    .failed(&link, failure, Instant::now());
             }
         }
     }
@@ -163,7 +157,7 @@ impl App {
         self.hires_sources_dirty = true;
         self.palv_renewal.restart_scan();
         self.palv_renewal.attempts.retain(|link, attempt| {
-            matches!(attempt, Attempt::Running { .. })
+            matches!(attempt, Attempt::Running)
                 || self
                     .hires_sources
                     .iter()
@@ -202,6 +196,10 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+pub(super) fn auto_renew_enabled(value: Option<&str>) -> bool {
+    value.is_none_or(|value| value == "1")
+}
+
 pub(super) fn expiry_label(session: &Session) -> String {
     let seconds = session.expires_at().saturating_sub(unix_now());
     match seconds {
@@ -209,5 +207,31 @@ pub(super) fn expiry_label(session: &Session) -> String {
         1..=59 => "Expires in under a minute".to_owned(),
         60..=3599 => format!("Expires in {} min", seconds / 60),
         _ => format!("Expires in {} h {} min", seconds / 3600, seconds / 60 % 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_failures_continue_to_schedule_retries() {
+        let mut renewal = Renewal::new(true);
+        let link = "test-session";
+        let now = Instant::now();
+        for _ in 0..3 {
+            renewal.attempts.insert(link.into(), Attempt::Running);
+            renewal.failed(link, Failure::Retry, now);
+            assert!(matches!(renewal.attempts.get(link), Some(Attempt::RetryAt(at)) if *at == now + RETRY_DELAY));
+        }
+        renewal.failed(link, Failure::RateLimited, now);
+        assert!(matches!(renewal.attempts.get(link), Some(Attempt::Paused(_))));
+    }
+
+    #[test]
+    fn renewal_is_enabled_for_new_preferences_and_preserves_opt_out() {
+        assert!(auto_renew_enabled(None));
+        assert!(auto_renew_enabled(Some("1")));
+        assert!(!auto_renew_enabled(Some("0")));
     }
 }
